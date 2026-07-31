@@ -40,7 +40,7 @@ interface ProjectPayload { project?: ProjectSummary; id?: string; name?: string;
 interface ActiveContext { active?: boolean; projectId?: string; projectName?: string | null; fileName?: string | null; ageMs?: number | null }
 type ResolvedProject = { id: string; name: string; source: 'uuid' | 'id' | 'exact' | 'slug' | 'substring' };
 interface ProjectListCache { baseUrl: string; t: number; list: ProjectSummary[] }
-interface McpArgs extends JsonObject { project?: unknown; entry?: unknown; include?: unknown; maxBytes?: unknown; path?: unknown; offset?: unknown; limit?: unknown; since?: unknown; query?: unknown; pattern?: unknown; max?: unknown; name?: unknown; content?: unknown; encoding?: unknown; artifactManifest?: unknown; confirm?: unknown; prompt?: unknown; plugin?: unknown; inputs?: unknown; agent?: unknown; model?: unknown; serviceTier?: unknown; runId?: unknown; id?: unknown; designSystem?: unknown; skill?: unknown; includeUnavailable?: unknown }
+interface McpArgs extends JsonObject { project?: unknown; entry?: unknown; include?: unknown; maxBytes?: unknown; path?: unknown; offset?: unknown; limit?: unknown; since?: unknown; query?: unknown; pattern?: unknown; max?: unknown; name?: unknown; content?: unknown; encoding?: unknown; artifactManifest?: unknown; confirm?: unknown; prompt?: unknown; plugin?: unknown; inputs?: unknown; agent?: unknown; model?: unknown; serviceTier?: unknown; runId?: unknown; id?: unknown; designSystem?: unknown; skill?: unknown; includeUnavailable?: unknown;discovery?: unknown }
 interface ProjectFileBundleEntry { name: string; mime: string; size: number | null; content: string | null; binary: boolean }
 interface BundleInput { project: ProjectPayload | ProjectSummary; entry: string; files: ProjectFileBundleEntry[]; truncated: boolean; active: ActiveContext | null; resolved?: ResolvedProject | null }
 interface ErrorWithCode { message?: string; code?: string; cause?: { code?: string } }
@@ -387,6 +387,12 @@ const TOOL_DEFS = [
           description: 'Optional design system id to attach (see the od://design-systems/... resources).',
         },
         skill: { type: 'string', description: 'Optional skill id to seed the project with.' },
+        discovery: {
+          type: 'string',
+          enum: ['skip', 'required'],
+          description:
+            'skip generates directly; required lets Open Design ask discovery questions before generation.',
+          },
       },
       required: ['name'],
       additionalProperties: false,
@@ -497,6 +503,59 @@ const TOOL_DEFS = [
       additionalProperties: false,
     },
     annotations: { ...READ_ANNOTATIONS, title: 'List Open Design agents' },
+  },
+  {
+    name: 'test_elicitation',
+    description: 'Test whether the MCP client supports form elicitation.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, title: 'Test MCP elicitation' },
+  },
+  {
+  name: 'start_discovery',
+  description: 'Start a step-by-step Open Design discovery session.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      project: {
+        type: 'string',
+        description: 'Open Design project id.',
+      },
+      conversationId: {
+        type: 'string',
+        description: 'Conversation id returned by create_project.',
+      },
+    },
+    required: ['project', 'conversationId'],
+    additionalProperties: false,
+  },
+  annotations: { ...WRITE_ANNOTATIONS, title: 'Start Open Design discovery' },
+  },
+  {
+  name: 'answer_discovery',
+  description: 'Submit one answer and receive the next Open Design discovery question.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      sessionId: {
+        type: 'string',
+        description: 'Discovery session id.',
+      },
+      questionId: {
+        type: 'string',
+        description: 'Current question id.',
+      },
+      answer: {
+        description: 'Answer to the current question.',
+      },
+    },
+    required: ['sessionId', 'questionId', 'answer'],
+    additionalProperties: false,
+  },
+  annotations: { ...WRITE_ANNOTATIONS, title: 'Answer Open Design discovery' },
   },
 ];
 
@@ -689,9 +748,14 @@ export async function runMcpStdio({ daemonUrl }: RunMcpOptions): Promise<void> {
   }));
 
   server.setRequestHandler(CallToolRequestSchema, withMcpActivity(async (req) => {
-    const name = req.params?.name;
-    const args: McpArgs = (req.params?.arguments ?? {}) as McpArgs;
-    return handleMcpToolCall(baseUrl, name, args);
+  const name = req.params?.name;
+  const args: McpArgs = (req.params?.arguments ?? {}) as McpArgs;
+
+  if (name === 'test_elicitation') {
+    return testElicitation(server);
+  }
+
+  return handleMcpToolCall(baseUrl, name, args);
   }));
 
   const transport = new StdioServerTransport();
@@ -873,13 +937,88 @@ async function handleMcpToolCall(baseUrl: string, name: unknown, args: McpArgs) 
             {},
           ),
         );
-      }
+      };
+      case 'start_discovery':
+        return await startDiscovery(args);
+
+      case 'answer_discovery':
+        return await answerDiscovery(args);
       default:
         return errorResult(`unknown tool: ${name}`);
     }
   } catch (err) {
     return errorResult(formatError(err, baseUrl));
   }
+}
+
+type DiscoveryQuestion = {
+  id: string;
+  label: string;
+  type: 'select' | 'text';
+  options?: Array<{ label: string; value: string }>;
+};
+
+const DISCOVERY_QUESTIONS: DiscoveryQuestion[] = [
+  {
+    id: 'platform',
+    label: '目标平台是什么？',
+    type: 'select',
+    options: [
+      { label: '桌面端 Web', value: 'desktop-web' },
+      { label: '移动端 Web', value: 'mobile-web' },
+      { label: '响应式 Web', value: 'responsive-web' },
+    ],
+  },
+  {
+    id: 'renderMode',
+    label: '网页是静态还是动态？',
+    type: 'select',
+    options: [
+      { label: '静态页面', value: 'static' },
+      { label: '动态页面', value: 'dynamic' },
+    ],
+  },
+  {
+    id: 'appStructure',
+    label: '采用 SPA 还是 MPA？',
+    type: 'select',
+    options: [
+      { label: 'SPA 单页应用', value: 'spa' },
+      { label: 'MPA 多页应用', value: 'mpa' },
+    ],
+  },
+];
+
+const discoverySessions = new Map<
+  string,
+  {
+    projectId: string;
+    conversationId: string;
+    index: number;
+    answers: Record<string, unknown>;
+  }
+>();
+
+
+
+async function testElicitation(server: Server) {
+  const result = await server.elicitInput({
+    mode: 'form',
+    message: 'test_program 0731',
+    requestedSchema: {
+      type: 'object',
+      properties: {
+        projectName: {
+          type: 'string',
+          title: 'project 123',
+          description: '321 descpt',
+        },
+      },
+      required: ['projectName'],
+    },
+  });
+
+  return ok(result);
 }
 
 async function writeFile(baseUrl: string, args: McpArgs) {
@@ -993,7 +1132,8 @@ async function createProject(baseUrl: string, args: McpArgs) {
     typeof args.id === 'string' && args.id.length > 0
       ? args.id
       : slugifyProjectId(args.name);
-  const body: JsonObject = { id, name: args.name, skipDiscoveryBrief: true };
+  const discovery = args.discovery === 'required' ? 'required' : 'skip';
+  const body: JsonObject = { id, name: args.name, skipDiscoveryBrief: discovery !== 'required' };
   if (typeof args.designSystem === 'string' && args.designSystem.length > 0) {
     body.designSystemId = args.designSystem;
   }
@@ -1026,6 +1166,30 @@ async function listPlugins(baseUrl: string): Promise<JsonObject> {
   });
   return { plugins };
 }
+
+async function startDiscovery(args: McpArgs) {
+  requireString(args.project, 'project');
+  requireString(args.conversationId, 'conversationId');
+
+  const sessionId = randomUUID();
+
+  discoverySessions.set(sessionId, {
+    projectId: args.project,
+    conversationId: args.conversationId,
+    index: 0,
+    answers: {},
+  });
+
+  return ok({
+    status: 'needs_input',
+    sessionId,
+    projectId: args.project,
+    conversationId: args.conversationId,
+    question: DISCOVERY_QUESTIONS[0],
+  });
+}
+
+
 
 // Flatten daemon's agent definition into the few fields an external
 // agent needs to pick a value for start_run.agent. Default filters to
@@ -1202,6 +1366,47 @@ async function fetchRunAgentMessage(baseUrl: string, runId: string): Promise<str
   } catch {
     return null;
   }
+}
+
+async function answerDiscovery(args: McpArgs) {
+  requireString(args.sessionId, 'sessionId');
+  requireString(args.questionId, 'questionId');
+
+  const session = discoverySessions.get(args.sessionId);
+
+  if (!session) {
+    throw new Error('Discovery session not found or expired.');
+  }
+
+  const question = DISCOVERY_QUESTIONS[session.index];
+
+  if (!question || question.id !== args.questionId) {
+    throw new Error('Unexpected question id.');
+  }
+
+  session.answers[question.id] = args.answer;
+  session.index += 1;
+
+  const nextQuestion = DISCOVERY_QUESTIONS[session.index];
+
+  if (nextQuestion) {
+    return ok({
+      status: 'needs_input',
+      sessionId: args.sessionId,
+      projectId: session.projectId,
+      conversationId: session.conversationId,
+      question: nextQuestion,
+      answers: session.answers,
+    });
+  }
+
+  return ok({
+    status: 'ready',
+    sessionId: args.sessionId,
+    projectId: session.projectId,
+    conversationId: session.conversationId,
+    brief: session.answers,
+  });
 }
 
 // Studio deep links (browser-facing OD page that shows the file
