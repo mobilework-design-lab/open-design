@@ -11,6 +11,8 @@
 
 // Canonical open tag plus the `<ask-question>` alias. Matching only the open
 // tag is intentionally NOT enough on its own (see `emittedRenderableQuestionForm`).
+import { findFirstQuestionForm } from '@open-design/contracts';
+
 export const QUESTION_FORM_OPEN_RE = /<(question-form|ask-question)\b[^>]*>/i;
 
 // True when `body` is a renderable question-form body: JSON (optionally fenced)
@@ -59,18 +61,5 @@ export function findQuestionFormCloseTag(text: string, from: number, closeTag: s
 // doc) count as a clarification turn, so artifact-generating runs that merely
 // mention the markup are not misclassified.
 export function emittedRenderableQuestionForm(text: unknown): boolean {
-  if (typeof text !== 'string' || !text) return false;
-  let cursor = 0;
-  while (cursor < text.length) {
-    const m = QUESTION_FORM_OPEN_RE.exec(text.slice(cursor));
-    if (!m) return false;
-    const tagName = (m[1] ?? 'question-form').toLowerCase();
-    const closeTag = `</${tagName}>`;
-    const openEnd = cursor + m.index + m[0].length;
-    const closeIdx = findQuestionFormCloseTag(text, openEnd, closeTag);
-    if (closeIdx === -1) return false;
-    if (questionFormBodyIsRenderable(text.slice(openEnd, closeIdx))) return true;
-    cursor = closeIdx + closeTag.length;
-  }
-  return false;
+  return typeof text === 'string' && findFirstQuestionForm(text) !== null;
 }
