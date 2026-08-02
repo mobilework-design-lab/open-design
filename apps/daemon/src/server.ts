@@ -601,6 +601,7 @@ import {
 } from './live-artifacts/http-helpers.js';
 import { registerConnectorRoutes } from './connectors/routes.js';
 import { registerActiveContextRoutes } from './routes/active-context.js';
+import { registerDiscoverySessionRoutes } from './routes/discovery-sessions.js';
 import { registerAutomationRoutes } from './routes/automation.js';
 import { registerAttributionRoutes } from './routes/attribution.js';
 import { registerDaemonRoutes } from './routes/daemon.js';
@@ -2976,6 +2977,7 @@ export async function startServer({
     http: httpDeps,
     projectStore: projectStoreDeps,
   });
+  registerDiscoverySessionRoutes(app, { db, http: httpDeps });
   registerHostToolsRoutes(app, {
     db,
     http: httpDeps,
