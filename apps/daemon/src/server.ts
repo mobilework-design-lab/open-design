@@ -5751,11 +5751,18 @@ export async function startServer({
     const isMiMoContent = def.externalMcpInjection === 'mimo-env-content';
     if (isOpenCodeContent || isMiMoContent) {
       try {
+        // The inner OpenCode is the generation worker. It must not inherit the
+        // user's orchestration MCP and recursively call open-design_start_run.
+        const disabledServerIds =
+          def.id === 'opencode' || def.id === 'byok-opencode'
+            ? ['open-design']
+            : [];
         opencodeConfigContent = buildOpenCodeMcpConfigContent(
           enabledExternalMcp,
           oauthTokensForSpawn,
           {
             allowedDirectories: [effectiveCwd, ...extraAllowedDirs],
+            disabledServerIds,
             ...(byokOpenCodeProvider
               ? { extraConfig: byokOpenCodeProvider.config }
               : {}),
