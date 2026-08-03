@@ -18,7 +18,7 @@ import {
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { buildProjectRawFileUrl } from '@open-design/contracts';
+import { buildProjectRawFileUrl, findFirstQuestionForm } from '@open-design/contracts';
 import { randomUUID } from 'node:crypto';
 
 import { postCreateArtifactRequest } from './artifacts/create.js';
@@ -44,6 +44,12 @@ interface McpArgs extends JsonObject { project?: unknown; entry?: unknown; inclu
 interface ProjectFileBundleEntry { name: string; mime: string; size: number | null; content: string | null; binary: boolean }
 interface BundleInput { project: ProjectPayload | ProjectSummary; entry: string; files: ProjectFileBundleEntry[]; truncated: boolean; active: ActiveContext | null; resolved?: ResolvedProject | null }
 interface ErrorWithCode { message?: string; code?: string; cause?: { code?: string } }
+interface PendingDiscoveryRun {
+  initialRequest: string;
+  discoveryResponse?: JsonObject;
+}
+
+const pendingDiscoveryRuns = new Map<string, PendingDiscoveryRun>();
 
 interface McpIdleExitControllerOptions {
   idleMs: number;
@@ -396,7 +402,7 @@ const TOOL_DEFS = [
   {
     name: 'begin_discovery',
     description:
-      'Ask the Open Design inner agent to turn a natural-language design request into one complete question-form without creating files. Poll get_run for the agentMessage, then pass the returned form to start_discovery.',
+      'Ask the Open Design inner agent to turn a natural-language design request into one complete question-form without creating files. Poll get_run; when this discovery run succeeds, get_run automatically parses and persists the form as a discovery session and returns it for exact display.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1176,7 +1182,35 @@ async function beginDiscovery(baseUrl: string, args: McpArgs) {
     'User request:',
     String(args.prompt),
   ].join('\n');
-  return startRun(baseUrl, { ...args, prompt: discoveryPrompt });
+  const result = await startRun(baseUrl, { ...args, prompt: discoveryPrompt });
+  const payload = readMcpTextPayload(result);
+  const runId = typeof payload?.runId === 'string'
+    ? payload.runId
+    : typeof payload?.id === 'string'
+      ? payload.id
+      : null;
+  if (runId) {
+    pendingDiscoveryRuns.set(runId, { initialRequest: String(args.prompt) });
+  }
+  return result;
+}
+
+function readMcpTextPayload(result: unknown): JsonObject | null {
+  if (!result || typeof result !== 'object') return null;
+  const content = (result as { content?: unknown }).content;
+  if (!Array.isArray(content)) return null;
+  const first = content[0];
+  if (!first || typeof first !== 'object' || typeof (first as { text?: unknown }).text !== 'string') {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse((first as { text: string }).text);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as JsonObject
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 async function startDiscovery(baseUrl: string, args: McpArgs) {
@@ -1465,10 +1499,65 @@ async function getRun(baseUrl: string, args: McpArgs) {
   if (previewUrl) enriched.previewUrl = previewUrl;
   if (agentMessage) enriched.agentMessage = agentMessage;
   if (studioUrl) enriched.studioUrl = studioUrl;
+  const parsedForm = agentMessage ? findFirstQuestionForm(agentMessage) : null;
+  if (parsedForm) {
+    const pending = pendingDiscoveryRuns.get(args.runId);
+    const discoveryResponse = await persistDiscoveryFromRun(
+      baseUrl,
+      args.runId,
+      status,
+      parsedForm.form,
+      pending?.initialRequest ?? (typeof status.currentPrompt === 'string' ? status.currentPrompt : ''),
+    );
+    pendingDiscoveryRuns.delete(args.runId);
+    enriched.questionForm = parsedForm.form;
+    enriched.discovery = discoveryResponse;
+    enriched.hint = 'This run produced a complete question-form. The daemon has already persisted it as a discovery session. Display discovery.session.form exactly, including every option and recommendation; do not summarize, rewrite, omit, answer, or submit it yourself. Wait for the user to fill it, explicitly accept defaults, or skip. Then call submit_discovery with discovery.session.id and the user\'s explicit action.';
+    return ok(enriched);
+  }
+  if (!previewUrl) {
+    enriched.hint = 'Run finished but produced no files. Relay agentMessage to the user verbatim. Do not invent a replacement result or start another run unless the user explicitly asks. When studioUrl is present, show it as a clickable markdown link. eventsLogPath, when present, holds the full event log.';
+    return ok(enriched);
+  }
   enriched.hint = previewUrl
     ? `Run finished. studioUrl (when present) is the BEST link to hand the user — it opens the OD studio page that shows the rendered design AND the chat history (your prompts and the inner agent's replies) side by side. ALWAYS render studioUrl as a clickable markdown link: \`[Open Open Design studio](STUDIO_URL)\` — never as inline code or bare text, because clients like Codex / Cursor / Zed render markdown links as navigable in their built-in browser pane and inline code blocks are not clickable. previewUrl is the raw file URL if the user only wants the rendered output. agentMessage carries the inner agent's explanation; show it alongside the link. Call get_artifact({ project: "${status.projectId}" }) when you need the source files — always pass project explicitly; omitting it falls back to the active project, which may differ. eventsLogPath, when present, holds the full inner-agent event log for forensics.`
     : 'Run finished but produced no files. The inner agent\'s output is in agentMessage — relay it to the user verbatim. Most often this is a clarifying question (e.g. a <question-form>) you should answer by calling start_run again with a more specific prompt or a chosen plugin. When studioUrl is present, show it as a clickable markdown link (`[Open Open Design studio](STUDIO_URL)`) so the user can navigate to the OD page that shows the chat history — never render it as inline code. eventsLogPath, when present, holds the full event log if you need to inspect what happened.';
   return ok(enriched);
+}
+
+async function persistDiscoveryFromRun(
+  baseUrl: string,
+  runId: string,
+  status: JsonObject,
+  form: unknown,
+  initialRequest: string,
+): Promise<JsonObject> {
+  requireString(status.projectId, 'run projectId');
+  const conversationId =
+    typeof status.conversationId === 'string' && status.conversationId.length > 0
+      ? status.conversationId
+      : await getDefaultConversationId(baseUrl, status.projectId);
+  requireString(conversationId, 'run conversationId');
+  const sessionId = `run-${runId}`;
+  try {
+    return await postJson<JsonObject>(`${baseUrl}/api/discovery-sessions`, {
+      id: sessionId,
+      projectId: status.projectId,
+      conversationId,
+      initialRequest,
+      form,
+    });
+  } catch (error) {
+    // get_run may be polled more than once after completion. A deterministic
+    // session id keeps persistence idempotent across MCP reconnects.
+    try {
+      return await getJson<JsonObject>(
+        `${baseUrl}/api/discovery-sessions/${encodeURIComponent(sessionId)}`,
+      );
+    } catch {
+      throw error;
+    }
+  }
 }
 
 // Reassemble the inner agent's textual output from the SSE event log.
