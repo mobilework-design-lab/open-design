@@ -173,6 +173,7 @@ function mapQuestion(raw: unknown, index: number): FormQuestion | null {
   const min = parseNumber(question.min);
   const max = parseNumber(question.max);
   const step = parseNumber(question.step);
+  const defaultValue = parseDefaultValue(question, options);
   const mapped: FormQuestion = {
     id,
     label,
@@ -180,6 +181,7 @@ function mapQuestion(raw: unknown, index: number): FormQuestion | null {
     ...(options ? { options } : {}),
     ...(typeof question.placeholder === 'string' ? { placeholder: question.placeholder } : {}),
     ...(question.required === true ? { required: true } : {}),
+    ...(defaultValue !== undefined ? { defaultValue } : {}),
     ...(typeof question.help === 'string' ? { help: question.help } : {}),
     ...(typeof question.allowCustom === 'boolean' ? { allowCustom: question.allowCustom } : {}),
     ...(typeof question.customLabel === 'string' ? { customLabel: question.customLabel } : {}),
@@ -191,6 +193,34 @@ function mapQuestion(raw: unknown, index: number): FormQuestion | null {
   if (max !== undefined) mapped.max = max;
   if (step !== undefined) mapped.step = step;
   return mapped;
+}
+
+function parseDefaultValue(
+  question: Record<string, unknown>,
+  options: FormOption[] | undefined,
+): string | string[] | undefined {
+  const raw =
+    typeof question.defaultValue === 'string' || Array.isArray(question.defaultValue)
+      ? question.defaultValue
+      : typeof question.defaultValue === 'number' || typeof question.defaultValue === 'boolean'
+        ? String(question.defaultValue)
+        : typeof question.default === 'string' || Array.isArray(question.default)
+          ? question.default
+          : typeof question.default === 'number' || typeof question.default === 'boolean'
+            ? String(question.default)
+            : undefined;
+  if (typeof raw === 'string') return formOptionValueForLabel(raw, options);
+  if (Array.isArray(raw)) {
+    return raw
+      .filter((value): value is string => typeof value === 'string')
+      .map((value) => formOptionValueForLabel(value, options));
+  }
+  return undefined;
+}
+
+function formOptionValueForLabel(value: string, options: FormOption[] | undefined): string {
+  const match = options?.find((option) => option.value === value || option.label === value);
+  return match?.value ?? value;
 }
 
 function parseOptions(raw: unknown): FormOption[] | undefined {

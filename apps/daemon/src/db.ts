@@ -89,6 +89,23 @@ function migrate(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_conv_project
       ON conversations(project_id, updated_at DESC);
 
+    CREATE TABLE IF NOT EXISTS discovery_sessions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      conversation_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      form_json TEXT NOT NULL,
+      answers_json TEXT NOT NULL,
+      current_question_index INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+      FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_discovery_sessions_conversation
+      ON discovery_sessions(conversation_id, updated_at DESC);
+
     CREATE TABLE IF NOT EXISTS agent_sessions (
       conversation_id TEXT NOT NULL,
       agent_id        TEXT NOT NULL,

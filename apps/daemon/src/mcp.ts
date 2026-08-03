@@ -40,7 +40,7 @@ interface ProjectPayload { project?: ProjectSummary; id?: string; name?: string;
 interface ActiveContext { active?: boolean; projectId?: string; projectName?: string | null; fileName?: string | null; ageMs?: number | null }
 type ResolvedProject = { id: string; name: string; source: 'uuid' | 'id' | 'exact' | 'slug' | 'substring' };
 interface ProjectListCache { baseUrl: string; t: number; list: ProjectSummary[] }
-interface McpArgs extends JsonObject { project?: unknown; entry?: unknown; include?: unknown; maxBytes?: unknown; path?: unknown; offset?: unknown; limit?: unknown; since?: unknown; query?: unknown; pattern?: unknown; max?: unknown; name?: unknown; content?: unknown; encoding?: unknown; artifactManifest?: unknown; confirm?: unknown; prompt?: unknown; plugin?: unknown; inputs?: unknown; agent?: unknown; model?: unknown; serviceTier?: unknown; runId?: unknown; id?: unknown; designSystem?: unknown; skill?: unknown; includeUnavailable?: unknown }
+interface McpArgs extends JsonObject { project?: unknown; entry?: unknown; include?: unknown; maxBytes?: unknown; path?: unknown; offset?: unknown; limit?: unknown; since?: unknown; query?: unknown; pattern?: unknown; max?: unknown; name?: unknown; content?: unknown; encoding?: unknown; artifactManifest?: unknown; confirm?: unknown; prompt?: unknown; plugin?: unknown; inputs?: unknown; agent?: unknown; model?: unknown; serviceTier?: unknown; runId?: unknown; id?: unknown; sessionId?: unknown; conversationId?: unknown; questionId?: unknown; answer?: unknown; answers?: unknown; form?: unknown; designSystem?: unknown; skill?: unknown; includeUnavailable?: unknown }
 interface ProjectFileBundleEntry { name: string; mime: string; size: number | null; content: string | null; binary: boolean }
 interface BundleInput { project: ProjectPayload | ProjectSummary; entry: string; files: ProjectFileBundleEntry[]; truncated: boolean; active: ActiveContext | null; resolved?: ResolvedProject | null }
 interface ErrorWithCode { message?: string; code?: string; cause?: { code?: string } }
@@ -392,6 +392,100 @@ const TOOL_DEFS = [
       additionalProperties: false,
     },
     annotations: { ...WRITE_ANNOTATIONS, title: 'Create Open Design project' },
+  },
+  {
+    name: 'begin_discovery',
+    description:
+      'Ask the Open Design inner agent to turn a natural-language design request into one complete question-form without creating files. Poll get_run for the agentMessage, then pass the returned form to start_discovery.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: PROJECT_ARG,
+        prompt: { type: 'string', description: 'The user\'s natural-language design request.' },
+        agent: { type: 'string', description: 'Optional Open Design inner agent id.' },
+        model: { type: 'string', description: 'Optional model override.' },
+      },
+      required: ['prompt'],
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, title: 'Begin Open Design discovery' },
+  },
+  {
+    name: 'start_discovery',
+    description:
+      'Persist a complete Open Design single-shot question form for one project conversation. Show the full form, including its options and recommendations, and wait for the user to review or fill it; never submit inferred answers.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: PROJECT_ARG,
+        conversationId: { type: 'string', description: 'Conversation id. If omitted, the project default conversation is used.' },
+        id: { type: 'string', description: 'Optional discovery session id.' },
+        form: {
+          type: 'object',
+          description: 'Question form produced by Open Design. Must contain id, title, and a non-empty questions array.',
+          additionalProperties: true,
+        },
+      },
+      required: ['form'],
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, title: 'Start Open Design discovery' },
+  },
+  {
+    name: 'get_discovery',
+    description: 'Read the persisted discovery session, including the complete form and answers collected so far.',
+    inputSchema: {
+      type: 'object',
+      properties: { sessionId: { type: 'string', description: 'Discovery session id returned by start_discovery.' } },
+      required: ['sessionId'],
+      additionalProperties: false,
+    },
+    annotations: { ...READ_ANNOTATIONS, title: 'Read discovery session' },
+  },
+  {
+    name: 'submit_discovery',
+    description:
+      'Submit the complete set of answers for the Open Design single-shot form. Call this once after the user reviews or fills the full form; do not submit inferred answers. When ready, the result includes a brief for the next start_run call.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string', description: 'Discovery session id returned by start_discovery.' },
+        answers: {
+          type: 'object',
+          description: 'Map from question id to the user-confirmed answer.',
+          additionalProperties: true,
+        },
+      },
+      required: ['sessionId', 'answers'],
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, title: 'Submit Open Design discovery form' },
+  },
+  {
+    name: 'answer_discovery',
+    description: 'Legacy sequential-interview helper. The primary scheme-2A path is submit_discovery with the complete form answers.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string', description: 'Discovery session id.' },
+        questionId: { type: 'string', description: 'The id of the current question.' },
+        answer: { description: 'The user answer. Its JSON type follows the question type.' },
+      },
+      required: ['sessionId', 'questionId', 'answer'],
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, title: 'Answer discovery question' },
+  },
+  {
+    name: 'cancel_discovery',
+    description: 'Cancel a persisted discovery session so it cannot accept further answers.',
+    inputSchema: {
+      type: 'object',
+      properties: { sessionId: { type: 'string', description: 'Discovery session id.' } },
+      required: ['sessionId'],
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, title: 'Cancel discovery session' },
   },
   // Discovery + generation. An external coding agent does NOT run a
   // skill itself — it commissions Open Design to, via start_run. The
@@ -855,6 +949,18 @@ async function handleMcpToolCall(baseUrl: string, name: unknown, args: McpArgs) 
         return await deleteProject(baseUrl, args);
       case 'create_project':
         return await createProject(baseUrl, args);
+      case 'begin_discovery':
+        return await beginDiscovery(baseUrl, args);
+      case 'start_discovery':
+        return await startDiscovery(baseUrl, args);
+      case 'get_discovery':
+        return await getDiscovery(baseUrl, args);
+      case 'submit_discovery':
+        return await submitDiscovery(baseUrl, args);
+      case 'answer_discovery':
+        return await answerDiscovery(baseUrl, args);
+      case 'cancel_discovery':
+        return await cancelDiscovery(baseUrl, args);
       case 'list_skills':
         return ok(await getJson<SkillsPayload>(`${baseUrl}/api/skills`));
       case 'list_plugins':
@@ -1001,6 +1107,100 @@ async function createProject(baseUrl: string, args: McpArgs) {
     body.skillId = args.skill;
   }
   return ok(await postJson<JsonObject>(`${baseUrl}/api/projects`, body));
+}
+
+async function beginDiscovery(baseUrl: string, args: McpArgs) {
+  requireString(args.prompt, 'prompt');
+  const discoveryPrompt = [
+    'You are in Open Design discovery-only mode.',
+    'Do not create, modify, or write any files.',
+    'Do not start implementation or generation.',
+    'Convert the user request below into exactly one complete <question-form> block.',
+    'Ask only high-value questions needed to decide the design direction and implementation shape.',
+    'Use Open Design\'s single-shot brief style: at most five high-value questions may cover the major dimensions of the request.',
+    'Recommended default/defaultValue fields are allowed and should be clearly treated as suggestions, never as user answers.',
+    'The form must be valid JSON with id, title, and a non-empty questions array.',
+    'Each question needs id, label, and type; use options for a small set of choices when useful. Do not claim the user selected a recommendation unless the user explicitly confirms it.',
+    'Return the question-form block as the final assistant message so the outer agent can parse it.',
+    '',
+    'User request:',
+    String(args.prompt),
+  ].join('\n');
+  return startRun(baseUrl, { ...args, prompt: discoveryPrompt });
+}
+
+async function startDiscovery(baseUrl: string, args: McpArgs) {
+  const { id, resolved, active } = await resolveProjectArg(baseUrl, args.project);
+  if (!args.form || typeof args.form !== 'object' || Array.isArray(args.form)) {
+    throw new Error('form must be an object produced by Open Design');
+  }
+  const form = args.form as JsonObject;
+  if (
+    typeof form.id !== 'string' ||
+    typeof form.title !== 'string' ||
+    !Array.isArray(form.questions) ||
+    form.questions.length === 0
+  ) {
+    throw new Error('form must contain id, title, and a non-empty questions array');
+  }
+  const conversationId =
+    typeof args.conversationId === 'string' && args.conversationId.length > 0
+      ? args.conversationId
+      : await getDefaultConversationId(baseUrl, id);
+  requireString(conversationId, 'conversationId');
+  const body: JsonObject = { projectId: id, conversationId, form };
+  if (typeof args.id === 'string' && args.id.length > 0) body.id = args.id;
+  return ok(
+    withActiveEcho(
+      await postJson<JsonObject>(`${baseUrl}/api/discovery-sessions`, body),
+      active,
+      resolved,
+    ),
+  );
+}
+
+async function getDiscovery(baseUrl: string, args: McpArgs) {
+  requireString(args.sessionId, 'sessionId');
+  return ok(
+    await getJson<JsonObject>(
+      `${baseUrl}/api/discovery-sessions/${encodeURIComponent(String(args.sessionId))}`,
+    ),
+  );
+}
+
+async function submitDiscovery(baseUrl: string, args: McpArgs) {
+  requireString(args.sessionId, 'sessionId');
+  if (!args.answers || typeof args.answers !== 'object' || Array.isArray(args.answers)) {
+    throw new Error('answers must be an object');
+  }
+  return ok(
+    await postJson<JsonObject>(
+      `${baseUrl}/api/discovery-sessions/${encodeURIComponent(String(args.sessionId))}/submit`,
+      { answers: args.answers },
+    ),
+  );
+}
+
+async function answerDiscovery(baseUrl: string, args: McpArgs) {
+  requireString(args.sessionId, 'sessionId');
+  requireString(args.questionId, 'questionId');
+  if (args.answer === undefined) throw new Error('answer is required');
+  return ok(
+    await postJson<JsonObject>(
+      `${baseUrl}/api/discovery-sessions/${encodeURIComponent(String(args.sessionId))}/answer`,
+      { questionId: args.questionId, answer: args.answer },
+    ),
+  );
+}
+
+async function cancelDiscovery(baseUrl: string, args: McpArgs) {
+  requireString(args.sessionId, 'sessionId');
+  return ok(
+    await postJson<JsonObject>(
+      `${baseUrl}/api/discovery-sessions/${encodeURIComponent(String(args.sessionId))}/cancel`,
+      {},
+    ),
+  );
 }
 
 // Flatten daemon's plugin record into the few fields an external agent
