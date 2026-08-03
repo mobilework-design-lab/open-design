@@ -189,6 +189,18 @@ function handleOpenCodeEvent(obj: unknown, onEvent: StreamEventHandler, state: P
         content: stringifyContent(statePart.output),
         isError: false,
       });
+    } else if (statePart?.status === 'error') {
+      // OpenCode's JSON run format emits both successful and failed tools as
+      // `type: "tool_use"`; the terminal state lives in `part.state.status`.
+      // Preserve failed tool output as a normalized tool_result. Otherwise a
+      // rejected patch is logged only as a tool_use and OpenCode may still
+      // exit 0, making the run look mysteriously successful with zero files.
+      onEvent({
+        type: 'tool_result',
+        toolUseId: part.callID,
+        content: stringifyContent(statePart.error ?? statePart.output ?? 'OpenCode tool failed'),
+        isError: true,
+      });
     }
     return true;
   }

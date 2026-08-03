@@ -1299,15 +1299,42 @@ async function generateFromDiscovery(baseUrl: string, args: McpArgs) {
   }
   requireString(persisted.projectId, 'discovery session projectId');
   requireString(discovery.brief, 'discovery brief');
+  // Discovery and generation have different responsibilities. The discovery
+  // agent only produces the form; resuming that native CLI session during the
+  // build can carry discovery-only instructions and an interrupted tool state
+  // into generation. Persist the brief in our own discovery session, then
+  // start the build in a fresh Open Design conversation/native agent session.
+  const conversationResponse = await postJson<JsonObject>(
+    `${baseUrl}/api/projects/${encodeURIComponent(String(persisted.projectId))}/conversations`,
+    {
+      title: 'Generate from confirmed discovery',
+      sessionMode: 'design',
+    },
+  );
+  const generationConversation = conversationResponse.conversation;
+  if (
+    !generationConversation ||
+    typeof generationConversation !== 'object' ||
+    Array.isArray(generationConversation)
+  ) {
+    throw new Error('generation conversation response is invalid');
+  }
+  requireString(
+    (generationConversation as JsonObject).id,
+    'generation conversation id',
+  );
   const generationPrompt = [
     'Generate the project from the confirmed Open Design discovery brief below.',
     'Treat the brief as authoritative. Do not run discovery again, ask new questions, rewrite the brief, or substitute different requirements.',
     'Create and save the requested project files with a runnable preview entry.',
+    'Filesystem contract: write every deliverable inside the active project directory only. For Write, Edit, and apply_patch, use project-relative paths such as index.html, styles.css, app.js, or pages/analytics.html. Never construct or mix absolute Windows/WSL paths (for example D:\\..., /mnt/d/..., or /mnt/D:/...).',
+    'If one file operation fails, read its tool error, correct the path or patch, and continue. Before finishing, verify that the requested files exist in the active project directory. Do not report completion while any build todo remains pending or in progress.',
     '',
     discovery.brief,
   ].join('\n');
   return startRun(baseUrl, {
     project: persisted.projectId,
+    conversationId: (generationConversation as JsonObject).id,
     prompt: generationPrompt,
     skill: args.skill,
     plugin: args.plugin,
@@ -1415,6 +1442,9 @@ function slugifyProjectId(name: string): string {
 async function startRun(baseUrl: string, args: McpArgs) {
   const { id, resolved, active } = await resolveProjectArg(baseUrl, args.project);
   const body: JsonObject = { projectId: id };
+  if (typeof args.conversationId === 'string' && args.conversationId.length > 0) {
+    body.conversationId = args.conversationId;
+  }
   if (typeof args.prompt === 'string' && args.prompt.length > 0) {
     body.message = args.prompt;
     body.currentPrompt = args.prompt;
@@ -1516,6 +1546,14 @@ async function getRun(baseUrl: string, args: McpArgs) {
     return ok(enriched);
   }
   if (!previewUrl) {
+    if (status.endedWithUnfinishedWork === true) {
+      enriched.daemonStatus = status.status;
+      enriched.status = 'incomplete';
+      enriched.deliveryStatus = 'incomplete';
+      enriched.failureReason = 'RUN_ENDED_WITH_UNFINISHED_WORK';
+      enriched.hint = 'The inner agent process exited, but Open Design detected unfinished work and no preview file. Do not describe this as a successful generation. Relay agentMessage, report that the delivery is incomplete, and use eventsLogPath to inspect the last tool result. A new generation attempt must start through generate_from_discovery so it uses the persisted brief and a fresh generation conversation; never invent files or call start_run directly.';
+      return ok(enriched);
+    }
     enriched.hint = 'Run finished but produced no files. Relay agentMessage to the user verbatim. Do not invent a replacement result or start another run unless the user explicitly asks. When studioUrl is present, show it as a clickable markdown link. eventsLogPath, when present, holds the full event log.';
     return ok(enriched);
   }
