@@ -1482,6 +1482,226 @@ async function startRun(baseUrl: string, args: McpArgs) {
   );
 }
 
+type StaticDeliveryStatus = 'valid' | 'incomplete' | 'unavailable' | 'not_applicable';
+
+function htmlAttribute(tag: string, name: string): string | null {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = tag.match(
+    new RegExp(`\\b${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i'),
+  );
+  return match ? (match[1] ?? match[2] ?? match[3] ?? null) : null;
+}
+
+function stylesheetReferences(html: string): string[] {
+  const refs: string[] = [];
+  for (const match of html.matchAll(/<link\b[^>]*>/gi)) {
+    const tag = match[0];
+    const rel = htmlAttribute(tag, 'rel');
+    const href = htmlAttribute(tag, 'href');
+    if (href && rel?.split(/\s+/).some((value) => value.toLowerCase() === 'stylesheet')) {
+      refs.push(href);
+    }
+  }
+  return refs;
+}
+
+function countCssRenderRules(css: string): number {
+  const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  let count = 0;
+  // This deliberately stays a conservative static check rather than a full
+  // CSS parser. It catches the important failure mode where a generated
+  // stylesheet contains only :root tokens, while accepting ordinary rules
+  // nested inside media/container queries.
+  for (const match of withoutComments.matchAll(/([^{}]+)\{[^{}]*}/g)) {
+    const selector = (match[1] ?? '').trim();
+    if (!selector || selector.startsWith('@')) continue;
+    const meaningful = selector
+      .split(',')
+      .map((part) => part.trim().toLowerCase())
+      .some((part) =>
+        Boolean(
+          part &&
+          part !== ':root' &&
+          part !== 'from' &&
+          part !== 'to' &&
+          !/^\d+(?:\.\d+)?%$/.test(part),
+        ),
+      );
+    if (meaningful) count += 1;
+  }
+  return count;
+}
+
+function localStylesheetPath(raw: string, fromPath: string): string | null {
+  if (/^(?:https?:|\/\/|data:)/i.test(raw)) return null;
+  const dir = fromPath.includes('/')
+    ? fromPath.slice(0, fromPath.lastIndexOf('/') + 1)
+    : '';
+  const resolved = raw.startsWith('/') ? raw.slice(1) : dir + raw;
+  const stripped = resolved.replace(/[?#].*$/, '');
+  const segments = stripped.split('/').filter(Boolean);
+  const output: string[] = [];
+  for (const segment of segments) {
+    if (segment === '.') continue;
+    if (segment === '..') {
+      if (output.length === 0) return null;
+      output.pop();
+      continue;
+    }
+    output.push(segment);
+  }
+  return output.length > 0 ? output.join('/') : null;
+}
+
+async function validateStaticWebDelivery(
+  baseUrl: string,
+  projectId: string,
+  entryFile: string,
+): Promise<JsonObject> {
+  if (!/\.html?$/i.test(entryFile)) {
+    return { status: 'not_applicable' satisfies StaticDeliveryStatus, entryFile };
+  }
+
+  let entry: ProjectFileBundleEntry;
+  try {
+    entry = await fetchProjectFile(baseUrl, projectId, entryFile, 1_000_000);
+  } catch (error) {
+    const message = errorMessage(error);
+    if (/daemon\s+404\b/i.test(message)) {
+      return {
+        status: 'incomplete' satisfies StaticDeliveryStatus,
+        entryFile,
+        checkedFiles: [],
+        issues: [{ code: 'ENTRY_FILE_NOT_FOUND', path: entryFile, message }],
+      };
+    }
+    return {
+      status: 'unavailable' satisfies StaticDeliveryStatus,
+      entryFile,
+      reason: message,
+    };
+  }
+
+  const files = new Map<string, ProjectFileBundleEntry>([[entryFile, entry]]);
+  const issues: JsonObject[] = [];
+  const queue = extractRelativeRefs(entry.content ?? '', entryFile, entry.mime)
+    .map((path) => ({ path, depth: 1 }));
+  const queued = new Set(queue.map((item) => item.path));
+  const maxFiles = 40;
+  let validationUnavailableReason: string | null = null;
+
+  while (queue.length > 0 && files.size < maxFiles) {
+    const next = queue.shift();
+    if (!next || files.has(next.path)) continue;
+    try {
+      const file = await fetchProjectFile(baseUrl, projectId, next.path, 1_000_000);
+      files.set(next.path, file);
+      if (next.depth < 2 && !file.binary && typeof file.content === 'string') {
+        for (const ref of extractRelativeRefs(file.content, next.path, file.mime)) {
+          if (!files.has(ref) && !queued.has(ref)) {
+            queued.add(ref);
+            queue.push({ path: ref, depth: next.depth + 1 });
+          }
+        }
+      }
+    } catch (error) {
+      const message = errorMessage(error);
+      if (/daemon\s+404\b/i.test(message)) {
+        issues.push({
+          code: 'MISSING_LOCAL_REFERENCE',
+          path: next.path,
+          message: `Referenced local file "${next.path}" was not found.`,
+        });
+      } else {
+        validationUnavailableReason ??= message;
+      }
+    }
+  }
+
+  const entryHtml = entry.content ?? '';
+  if (
+    entryHtml.trim().length < 500 ||
+    !/<body\b/i.test(entryHtml) ||
+    !/<(?:main|section|article|nav|form|table)\b/i.test(entryHtml)
+  ) {
+    issues.push({
+      code: 'HTML_ENTRY_TOO_THIN',
+      path: entryFile,
+      message: 'The HTML entry is too small or lacks meaningful page structure.',
+    });
+  }
+
+  const stylesheetHrefs = stylesheetReferences(entryHtml);
+  const inlineStyles = [...entryHtml.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)]
+    .map((match) => match[1] ?? '');
+  const localStylesheets = stylesheetHrefs
+    .map((href) => localStylesheetPath(href, entryFile))
+    .filter((value): value is string => Boolean(value));
+  const externalStylesheetCount = stylesheetHrefs.length - localStylesheets.length;
+  const fetchedCss = [...files.values()].filter(
+    (file) => isCssLike(file.mime, file.name) && typeof file.content === 'string',
+  );
+
+  if (localStylesheets.length === 0 && externalStylesheetCount === 0 && inlineStyles.length === 0) {
+    issues.push({
+      code: 'NO_PRESENTATIONAL_STYLES',
+      path: entryFile,
+      message: 'The HTML entry has no linked or inline stylesheet.',
+    });
+  }
+
+  for (const css of fetchedCss) {
+    if (countCssRenderRules(css.content ?? '') === 0) {
+      issues.push({
+        code: 'CSS_HAS_NO_RENDER_RULES',
+        path: css.name,
+        message: 'The stylesheet contains tokens or at-rules but no rules that style page elements.',
+      });
+    }
+  }
+  if (
+    inlineStyles.length > 0 &&
+    localStylesheets.length === 0 &&
+    externalStylesheetCount === 0 &&
+    inlineStyles.every((css) => countCssRenderRules(css) === 0)
+  ) {
+    issues.push({
+      code: 'INLINE_CSS_HAS_NO_RENDER_RULES',
+      path: entryFile,
+      message: 'Inline CSS contains no rules that style page elements.',
+    });
+  }
+
+  const metrics: JsonObject = {
+    checkedFileCount: files.size,
+    htmlFileCount: [...files.values()].filter((file) => isHtmlLike(file.mime, file.name)).length,
+    cssFileCount: fetchedCss.length,
+    jsFileCount: [...files.values()].filter((file) => isJsLike(file.mime, file.name)).length,
+    totalTextBytes: [...files.values()].reduce(
+      (total, file) => total + (typeof file.content === 'string' ? file.content.length : 0),
+      0,
+    ),
+  };
+
+  if (validationUnavailableReason) {
+    return {
+      status: 'unavailable' satisfies StaticDeliveryStatus,
+      entryFile,
+      checkedFiles: [...files.keys()],
+      issues,
+      metrics,
+      reason: validationUnavailableReason,
+    };
+  }
+  return {
+    status: (issues.length > 0 ? 'incomplete' : 'valid') satisfies StaticDeliveryStatus,
+    entryFile,
+    checkedFiles: [...files.keys()],
+    issues,
+    metrics,
+  };
+}
+
 // Poll a run. On terminal status we enrich the daemon's status body
 // with three things the outer agent needs to actually close the loop:
 // (1) previewUrl when there's an entry file — open this in a browser,
@@ -1544,6 +1764,22 @@ async function getRun(baseUrl: string, args: McpArgs) {
     enriched.discovery = discoveryResponse;
     enriched.hint = 'This run produced a complete question-form. The daemon has already persisted it as a discovery session. Display discovery.session.form exactly, including every option and recommendation; do not summarize, rewrite, omit, answer, or submit it yourself. Wait for the user to fill it, explicitly accept defaults, or skip. Then call submit_discovery with discovery.session.id and the user\'s explicit action.';
     return ok(enriched);
+  }
+  if (previewUrl && entryFile) {
+    const deliveryValidation = await validateStaticWebDelivery(
+      baseUrl,
+      status.projectId,
+      entryFile,
+    );
+    enriched.deliveryValidation = deliveryValidation;
+    if (deliveryValidation.status === 'incomplete') {
+      enriched.daemonStatus = status.status;
+      enriched.status = 'incomplete';
+      enriched.deliveryStatus = 'incomplete';
+      enriched.failureReason = 'DELIVERY_VALIDATION_FAILED';
+      enriched.hint = 'The inner agent process exited successfully, but static delivery validation found missing or materially incomplete files. Do not report generation success. Show deliveryValidation.issues to the user and repair or regenerate the project before presenting previewUrl as the deliverable.';
+      return ok(enriched);
+    }
   }
   if (!previewUrl) {
     if (status.endedWithUnfinishedWork === true) {

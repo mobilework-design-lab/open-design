@@ -651,6 +651,180 @@ describe('public MCP discovery + generation tools', () => {
     expect(parsed.hint).toContain('generate_from_discovery');
   });
 
+  it('get_run rejects an HTML delivery whose stylesheet contains only root tokens', async () => {
+    const html = `<!doctype html><html><head><link rel="stylesheet" href="styles.css"></head><body><main><section>${'dashboard '.repeat(80)}</section></main></body></html>`;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/runs/run-token-css')) {
+        return new Response(JSON.stringify({
+          id: 'run-token-css',
+          status: 'succeeded',
+          projectId: 'project-1',
+          artifactCount: 1,
+        }), { status: 200 });
+      }
+      if (url.endsWith('/api/projects/project-1')) {
+        return new Response(JSON.stringify({
+          project: { id: 'project-1', metadata: { entryFile: 'index.html' } },
+        }), { status: 200 });
+      }
+      if (url.endsWith('/api/projects/project-1/raw/index.html')) {
+        return new Response(html, {
+          status: 200,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        });
+      }
+      if (url.endsWith('/api/projects/project-1/raw/styles.css')) {
+        return new Response(':root{--bg:white;--fg:black}', {
+          status: 200,
+          headers: { 'content-type': 'text/css; charset=utf-8' },
+        });
+      }
+      if (url.endsWith('/api/runs/run-token-css/events')) {
+        return new Response('', { status: 200 });
+      }
+      if (url.endsWith('/api/mcp/install-info')) {
+        return new Response(JSON.stringify({ webBaseUrl: null }), { status: 200 });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await handleMcpToolCall(
+      'http://127.0.0.1:17456',
+      'get_run',
+      { runId: 'run-token-css' },
+    );
+    const parsed = JSON.parse(firstText(result));
+    expect(parsed).toMatchObject({
+      status: 'incomplete',
+      daemonStatus: 'succeeded',
+      deliveryStatus: 'incomplete',
+      failureReason: 'DELIVERY_VALIDATION_FAILED',
+    });
+    expect(parsed.deliveryValidation.status).toBe('incomplete');
+    expect(parsed.deliveryValidation.issues).toContainEqual(expect.objectContaining({
+      code: 'CSS_HAS_NO_RENDER_RULES',
+      path: 'styles.css',
+    }));
+  });
+
+  it('get_run rejects an HTML delivery with a missing local dependency', async () => {
+    const html = `<!doctype html><html><head><link rel="stylesheet" href="styles.css"></head><body><main><section>${'dashboard '.repeat(80)}</section></main><script src="app.js"></script></body></html>`;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/runs/run-missing-js')) {
+        return new Response(JSON.stringify({
+          id: 'run-missing-js',
+          status: 'succeeded',
+          projectId: 'project-1',
+          artifactCount: 1,
+        }), { status: 200 });
+      }
+      if (url.endsWith('/api/projects/project-1')) {
+        return new Response(JSON.stringify({
+          project: { id: 'project-1', metadata: { entryFile: 'index.html' } },
+        }), { status: 200 });
+      }
+      if (url.endsWith('/api/projects/project-1/raw/index.html')) {
+        return new Response(html, {
+          status: 200,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        });
+      }
+      if (url.endsWith('/api/projects/project-1/raw/styles.css')) {
+        return new Response(':root{--bg:white}body{margin:0;background:var(--bg)}', {
+          status: 200,
+          headers: { 'content-type': 'text/css; charset=utf-8' },
+        });
+      }
+      if (url.endsWith('/api/projects/project-1/raw/app.js')) {
+        return new Response('missing', { status: 404 });
+      }
+      if (url.endsWith('/api/runs/run-missing-js/events')) {
+        return new Response('', { status: 200 });
+      }
+      if (url.endsWith('/api/mcp/install-info')) {
+        return new Response(JSON.stringify({ webBaseUrl: null }), { status: 200 });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await handleMcpToolCall(
+      'http://127.0.0.1:17456',
+      'get_run',
+      { runId: 'run-missing-js' },
+    );
+    const parsed = JSON.parse(firstText(result));
+    expect(parsed.status).toBe('incomplete');
+    expect(parsed.deliveryValidation.issues).toContainEqual(expect.objectContaining({
+      code: 'MISSING_LOCAL_REFERENCE',
+      path: 'app.js',
+    }));
+  });
+
+  it('get_run accepts a substantive static HTML delivery', async () => {
+    const html = `<!doctype html><html><head><link rel="stylesheet" href="styles.css"></head><body><main><nav>Workspace</nav><section>${'dashboard '.repeat(80)}</section></main><script src="app.js"></script></body></html>`;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/runs/run-valid-web')) {
+        return new Response(JSON.stringify({
+          id: 'run-valid-web',
+          status: 'succeeded',
+          projectId: 'project-1',
+          artifactCount: 1,
+        }), { status: 200 });
+      }
+      if (url.endsWith('/api/projects/project-1')) {
+        return new Response(JSON.stringify({
+          project: { id: 'project-1', metadata: { entryFile: 'index.html' } },
+        }), { status: 200 });
+      }
+      if (url.endsWith('/api/projects/project-1/raw/index.html')) {
+        return new Response(html, {
+          status: 200,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        });
+      }
+      if (url.endsWith('/api/projects/project-1/raw/styles.css')) {
+        return new Response(':root{--bg:white}body{margin:0;background:var(--bg)}.dashboard{display:grid}', {
+          status: 200,
+          headers: { 'content-type': 'text/css; charset=utf-8' },
+        });
+      }
+      if (url.endsWith('/api/projects/project-1/raw/app.js')) {
+        return new Response('document.documentElement.dataset.ready = "true";', {
+          status: 200,
+          headers: { 'content-type': 'text/javascript; charset=utf-8' },
+        });
+      }
+      if (url.endsWith('/api/runs/run-valid-web/events')) {
+        return new Response('', { status: 200 });
+      }
+      if (url.endsWith('/api/mcp/install-info')) {
+        return new Response(JSON.stringify({ webBaseUrl: null }), { status: 200 });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await handleMcpToolCall(
+      'http://127.0.0.1:17456',
+      'get_run',
+      { runId: 'run-valid-web' },
+    );
+    const parsed = JSON.parse(firstText(result));
+    expect(parsed.status).toBe('succeeded');
+    expect(parsed.deliveryValidation).toMatchObject({
+      status: 'valid',
+      entryFile: 'index.html',
+      metrics: {
+        checkedFileCount: 3,
+        htmlFileCount: 1,
+        cssFileCount: 1,
+        jsFileCount: 1,
+      },
+    });
+  });
+
   it('get_run still includes agentMessage even when previewUrl is present', async () => {
     const fetchMock = vi.fn(async (url: string) => {
       if (url.endsWith('/api/runs/run-42')) {
