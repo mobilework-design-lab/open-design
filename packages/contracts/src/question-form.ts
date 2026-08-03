@@ -46,6 +46,7 @@ export interface FormQuestion {
   customPlaceholder?: string;
   min?: number;
   max?: number;
+  maxSelections?: number;
   step?: number;
   multiple?: boolean;
   accept?: string;
@@ -172,6 +173,7 @@ function mapQuestion(raw: unknown, index: number): FormQuestion | null {
       : id;
   const min = parseNumber(question.min);
   const max = parseNumber(question.max);
+  const maxSelections = parseNumber(question.maxSelections);
   const step = parseNumber(question.step);
   const defaultValue = parseDefaultValue(question, options);
   const mapped: FormQuestion = {
@@ -191,6 +193,7 @@ function mapQuestion(raw: unknown, index: number): FormQuestion | null {
   };
   if (min !== undefined) mapped.min = min;
   if (max !== undefined) mapped.max = max;
+  if (maxSelections !== undefined) mapped.maxSelections = maxSelections;
   if (step !== undefined) mapped.step = step;
   return mapped;
 }

@@ -54,4 +54,23 @@ describe('findFirstQuestionForm', () => {
     expect(findFirstQuestionForm('<question-form>{"questions":[]}</question-form>')).toBeNull();
     expect(findFirstQuestionForm('<question-form>{"questions":[null]}</question-form>')).toBeNull();
   });
+
+  it('normalizes recommended defaults and checkbox selection limits', () => {
+    const result = findFirstQuestionForm(`<question-form id="constraints" title="Constraints">
+{"questions":[{
+  "id":"devices",
+  "label":"Target devices",
+  "type":"checkbox",
+  "options":[{"label":"Desktop","value":"desktop"},{"label":"Mobile","value":"mobile"}],
+  "default":["desktop"],
+  "maxSelections":1
+}]}
+</question-form>`);
+
+    expect(result?.form.questions[0]).toMatchObject({
+      id: 'devices',
+      defaultValue: ['desktop'],
+      maxSelections: 1,
+    });
+  });
 });

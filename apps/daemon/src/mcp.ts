@@ -40,7 +40,7 @@ interface ProjectPayload { project?: ProjectSummary; id?: string; name?: string;
 interface ActiveContext { active?: boolean; projectId?: string; projectName?: string | null; fileName?: string | null; ageMs?: number | null }
 type ResolvedProject = { id: string; name: string; source: 'uuid' | 'id' | 'exact' | 'slug' | 'substring' };
 interface ProjectListCache { baseUrl: string; t: number; list: ProjectSummary[] }
-interface McpArgs extends JsonObject { project?: unknown; entry?: unknown; include?: unknown; maxBytes?: unknown; path?: unknown; offset?: unknown; limit?: unknown; since?: unknown; query?: unknown; pattern?: unknown; max?: unknown; name?: unknown; content?: unknown; encoding?: unknown; artifactManifest?: unknown; confirm?: unknown; prompt?: unknown; plugin?: unknown; inputs?: unknown; agent?: unknown; model?: unknown; serviceTier?: unknown; runId?: unknown; id?: unknown; sessionId?: unknown; conversationId?: unknown; questionId?: unknown; answer?: unknown; answers?: unknown; form?: unknown; designSystem?: unknown; skill?: unknown; includeUnavailable?: unknown }
+interface McpArgs extends JsonObject { project?: unknown; entry?: unknown; include?: unknown; maxBytes?: unknown; path?: unknown; offset?: unknown; limit?: unknown; since?: unknown; query?: unknown; pattern?: unknown; max?: unknown; name?: unknown; content?: unknown; encoding?: unknown; artifactManifest?: unknown; confirm?: unknown; prompt?: unknown; initialRequest?: unknown; action?: unknown; additionalContext?: unknown; plugin?: unknown; inputs?: unknown; agent?: unknown; model?: unknown; serviceTier?: unknown; runId?: unknown; id?: unknown; sessionId?: unknown; conversationId?: unknown; questionId?: unknown; answer?: unknown; answers?: unknown; form?: unknown; designSystem?: unknown; skill?: unknown; includeUnavailable?: unknown }
 interface ProjectFileBundleEntry { name: string; mime: string; size: number | null; content: string | null; binary: boolean }
 interface BundleInput { project: ProjectPayload | ProjectSummary; entry: string; files: ProjectFileBundleEntry[]; truncated: boolean; active: ActiveContext | null; resolved?: ResolvedProject | null }
 interface ErrorWithCode { message?: string; code?: string; cause?: { code?: string } }
@@ -413,13 +413,17 @@ const TOOL_DEFS = [
   {
     name: 'start_discovery',
     description:
-      'Persist a complete Open Design single-shot question form for one project conversation. Show the full form, including its options and recommendations, and wait for the user to review or fill it; never submit inferred answers.',
+      'Persist a complete Open Design single-shot question form together with the user\'s original request. Show the full form, including its options and recommendations, and wait for the user to review, accept defaults, skip, or provide answers; never submit inferred answers.',
     inputSchema: {
       type: 'object',
       properties: {
         project: PROJECT_ARG,
         conversationId: { type: 'string', description: 'Conversation id. If omitted, the project default conversation is used.' },
         id: { type: 'string', description: 'Optional discovery session id.' },
+        initialRequest: {
+          type: 'string',
+          description: 'The user\'s exact original design request. Preserve it verbatim so skipped or partial forms still have useful generation context.',
+        },
         form: {
           type: 'object',
           description: 'Question form produced by Open Design. Must contain id, title, and a non-empty questions array.',
@@ -445,21 +449,50 @@ const TOOL_DEFS = [
   {
     name: 'submit_discovery',
     description:
-      'Submit the complete set of answers for the Open Design single-shot form. Call this once after the user reviews or fills the full form; do not submit inferred answers. When ready, the result includes a brief for the next start_run call.',
+      'Finalize the Open Design single-shot form after the user explicitly chooses an action: submit answers, accept recommended defaults, or skip the form. Optional additionalContext preserves free-form requirements outside the listed options. Never infer an action or answer. The result includes the persisted brief.',
     inputSchema: {
       type: 'object',
       properties: {
         sessionId: { type: 'string', description: 'Discovery session id returned by start_discovery.' },
+        action: {
+          type: 'string',
+          enum: ['submit', 'accept_defaults', 'skip'],
+          description: 'The user\'s explicit choice. submit uses answers; accept_defaults uses form defaults; skip proceeds from the original request without form answers.',
+        },
         answers: {
           type: 'object',
-          description: 'Map from question id to the user-confirmed answer.',
+          description: 'Map from question id to user-confirmed answers. Optional for accept_defaults or skip. A null value explicitly skips one question.',
           additionalProperties: true,
         },
+        additionalContext: {
+          type: 'string',
+          description: 'User-provided requirements, corrections, or preferences that do not fit the form options.',
+        },
       },
-      required: ['sessionId', 'answers'],
+      required: ['sessionId', 'action'],
       additionalProperties: false,
     },
     annotations: { ...WRITE_ANNOTATIONS, title: 'Submit Open Design discovery form' },
+  },
+  {
+    name: 'generate_from_discovery',
+    description:
+      'Start exactly one Open Design generation run from a persisted ready discovery session. This reads the original request and confirmed brief from the daemon, so the outer agent must not copy, rewrite, summarize, or supplement the brief. Returns the normal runId for get_run polling.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string', description: 'A ready discovery session id returned by submit_discovery.' },
+        skill: { type: 'string', description: 'Optional Open Design skill id.' },
+        plugin: { type: 'string', description: 'Optional Open Design plugin id.' },
+        inputs: { type: 'object', additionalProperties: true, description: 'Optional plugin inputs.' },
+        agent: { type: 'string', description: 'Optional inner agent override.' },
+        model: { type: 'string', description: 'Optional model override.' },
+        serviceTier: { type: 'string', description: 'Optional service tier override.' },
+      },
+      required: ['sessionId'],
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, title: 'Generate from confirmed discovery' },
   },
   {
     name: 'answer_discovery',
@@ -664,6 +697,21 @@ export async function runMcpStdio({ daemonUrl }: RunMcpOptions): Promise<void> {
         '    on success it returns a previewUrl you can open in a browser',
         '    and a hint to pull the files with get_artifact.',
         ' - cancel_run(runId) aborts an in-flight run.',
+        '',
+        'Discovery for vague design requests (single-form scheme 2-A):',
+        ' - begin_discovery(project, prompt) asks the inner Open Design agent',
+        '    to produce one complete question-form without writing files.',
+        ' - Poll that run with get_run, parse its question-form, then call',
+        '    start_discovery(project, form, initialRequest). Preserve the',
+        '    user\'s exact request in initialRequest and show the entire form.',
+        ' - Wait for an explicit user decision. submit_discovery supports',
+        '    action=submit with answers, action=accept_defaults, or action=skip.',
+        '    Put requirements outside the offered choices in additionalContext.',
+        '    Never silently choose defaults or manufacture missing answers.',
+        ' - After submit_discovery returns ready, call generate_from_discovery',
+        '    with only the sessionId. Do NOT copy its brief into start_run:',
+        '    generate_from_discovery reads the persisted authoritative brief',
+        '    and starts exactly one generation run itself.',
         '',
         'Generation patience: Open Design runs typically take 5–30',
         'minutes. Polls returning status:running with unchanged file',
@@ -957,6 +1005,8 @@ async function handleMcpToolCall(baseUrl: string, name: unknown, args: McpArgs) 
         return await getDiscovery(baseUrl, args);
       case 'submit_discovery':
         return await submitDiscovery(baseUrl, args);
+      case 'generate_from_discovery':
+        return await generateFromDiscovery(baseUrl, args);
       case 'answer_discovery':
         return await answerDiscovery(baseUrl, args);
       case 'cancel_discovery':
@@ -1148,7 +1198,12 @@ async function startDiscovery(baseUrl: string, args: McpArgs) {
       ? args.conversationId
       : await getDefaultConversationId(baseUrl, id);
   requireString(conversationId, 'conversationId');
-  const body: JsonObject = { projectId: id, conversationId, form };
+  const body: JsonObject = {
+    projectId: id,
+    conversationId,
+    form,
+    initialRequest: typeof args.initialRequest === 'string' ? args.initialRequest : '',
+  };
   if (typeof args.id === 'string' && args.id.length > 0) body.id = args.id;
   return ok(
     withActiveEcho(
@@ -1170,15 +1225,63 @@ async function getDiscovery(baseUrl: string, args: McpArgs) {
 
 async function submitDiscovery(baseUrl: string, args: McpArgs) {
   requireString(args.sessionId, 'sessionId');
-  if (!args.answers || typeof args.answers !== 'object' || Array.isArray(args.answers)) {
-    throw new Error('answers must be an object');
+  requireString(args.action, 'action');
+  if (args.action !== 'submit' && args.action !== 'accept_defaults' && args.action !== 'skip') {
+    throw new Error('action must be submit, accept_defaults, or skip');
+  }
+  if (
+    args.answers !== undefined &&
+    (!args.answers || typeof args.answers !== 'object' || Array.isArray(args.answers))
+  ) {
+    throw new Error('answers must be an object when provided');
+  }
+  if (args.additionalContext !== undefined && typeof args.additionalContext !== 'string') {
+    throw new Error('additionalContext must be a string when provided');
   }
   return ok(
     await postJson<JsonObject>(
       `${baseUrl}/api/discovery-sessions/${encodeURIComponent(String(args.sessionId))}/submit`,
-      { answers: args.answers },
+      {
+        action: args.action,
+        answers: args.answers ?? {},
+        additionalContext: args.additionalContext ?? '',
+      },
     ),
   );
+}
+
+async function generateFromDiscovery(baseUrl: string, args: McpArgs) {
+  requireString(args.sessionId, 'sessionId');
+  const discovery = await getJson<JsonObject>(
+    `${baseUrl}/api/discovery-sessions/${encodeURIComponent(args.sessionId)}`,
+  );
+  const session = discovery.session;
+  if (!session || typeof session !== 'object' || Array.isArray(session)) {
+    throw new Error('discovery session response is invalid');
+  }
+  const persisted = session as JsonObject;
+  if (persisted.status !== 'ready') {
+    throw new Error(`discovery session must be ready before generation (current: ${String(persisted.status)})`);
+  }
+  requireString(persisted.projectId, 'discovery session projectId');
+  requireString(discovery.brief, 'discovery brief');
+  const generationPrompt = [
+    'Generate the project from the confirmed Open Design discovery brief below.',
+    'Treat the brief as authoritative. Do not run discovery again, ask new questions, rewrite the brief, or substitute different requirements.',
+    'Create and save the requested project files with a runnable preview entry.',
+    '',
+    discovery.brief,
+  ].join('\n');
+  return startRun(baseUrl, {
+    project: persisted.projectId,
+    prompt: generationPrompt,
+    skill: args.skill,
+    plugin: args.plugin,
+    inputs: args.inputs,
+    agent: args.agent,
+    model: args.model,
+    serviceTier: args.serviceTier,
+  });
 }
 
 async function answerDiscovery(baseUrl: string, args: McpArgs) {

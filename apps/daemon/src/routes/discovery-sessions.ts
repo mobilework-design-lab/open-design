@@ -39,7 +39,7 @@ function discoveryResponse(session: ReturnType<typeof getDiscoverySession>) {
     awaitingUser,
     ...(session.status === 'ready' ? {
       brief: buildDiscoveryBrief(session),
-      nextAction: 'call start_run with the brief',
+      nextAction: 'call generate_from_discovery with this session id',
     } : {}),
   };
 }
@@ -69,6 +69,7 @@ export function registerDiscoverySessionRoutes(
     const body = (req.body ?? {}) as Record<string, unknown>;
     const projectId = typeof body.projectId === 'string' ? body.projectId : '';
     const conversationId = typeof body.conversationId === 'string' ? body.conversationId : '';
+    const initialRequest = typeof body.initialRequest === 'string' ? body.initialRequest : '';
     if (!projectId || !conversationId || !isQuestionForm(body.form)) {
       return res.status(400).json({
         error: 'projectId, conversationId, and a non-empty form are required',
@@ -88,6 +89,7 @@ export function registerDiscoverySessionRoutes(
         projectId,
         conversationId,
         form: body.form,
+        initialRequest,
       });
       return res.status(201).json(discoveryResponse(session));
     } catch (error) {
@@ -121,14 +123,28 @@ export function registerDiscoverySessionRoutes(
 
   app.post('/api/discovery-sessions/:id/submit', (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
-    if (!body.answers || typeof body.answers !== 'object' || Array.isArray(body.answers)) {
+    const action = body.action === undefined ? 'submit' : body.action;
+    if (action !== 'submit' && action !== 'accept_defaults' && action !== 'skip') {
+      return res.status(400).json({ error: 'action must be submit, accept_defaults, or skip', code: 'BAD_REQUEST' });
+    }
+    if (
+      body.answers !== undefined &&
+      (!body.answers || typeof body.answers !== 'object' || Array.isArray(body.answers))
+    ) {
       return res.status(400).json({ error: 'answers must be an object', code: 'BAD_REQUEST' });
+    }
+    if (body.additionalContext !== undefined && typeof body.additionalContext !== 'string') {
+      return res.status(400).json({ error: 'additionalContext must be a string', code: 'BAD_REQUEST' });
     }
     try {
       const session = submitDiscoveryAnswers(
         db,
         req.params.id,
-        body.answers as Record<string, unknown>,
+        {
+          action,
+          answers: (body.answers ?? {}) as Record<string, unknown>,
+          additionalContext: typeof body.additionalContext === 'string' ? body.additionalContext : '',
+        },
       );
       return res.json(discoveryResponse(session));
     } catch (error) {
