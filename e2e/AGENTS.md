@@ -42,7 +42,8 @@ These invariants complement the coverage posture in
 this section is the source of truth for how a UI test must be written to stay
 green under the sharded full pool.
 
-The `ui-extended-main` full pool (`workflow_dispatch` with `suite=full`)
+The `ui-extended-main` full pool (the prerelease gate at its resolved build
+commit, or `workflow_dispatch` with `suite=full`)
 executes every non-visual functional shade in one generically sharded matrix
 (`visual-*.test.ts` is excluded by the config's `testIgnore` and runs in its
 own lane): arbitrary P0/P1/P2 interleavings, contiguous shard slices that
@@ -50,11 +51,10 @@ start mid-file, an isolated tools-dev runtime per Playwright worker
 (`nproc / 2`, so two on the `ui_hot` runner) with
 `OD_PLAYWRIGHT_FULLY_PARALLEL=1`, and slow CI runners. It is the only lane
 that runs the whole non-visual `ui` suite together — every P1/P2 shade, plus
-the P0 cases no merge lane covers: `ci.yml`'s `ui_p0` runs only the files
-listed in a `uiP0Groups` group, and `playwright_critical` only its own
-`@critical` file matrix, so a `[P0]`/`@critical` tag does not enroll a new
-file (the P0 cases in `automations-page.test.ts` and `home-hero-rail.test.ts`,
-for instance, run nowhere but the full pool). Two order hazards then hide from
+any P0 case whose file has not been enrolled in `uiP0Groups` or the
+`playwright_critical` file matrix. A `[P0]`/`@critical` tag alone does not
+enroll a new file, so topology validation and the prerelease full pool are both
+required backstops. Two order hazards then hide from
 narrower runs: within-file interleaving (the tests of one file racing under
 fully-parallel workers) and cross-file carry-over (the worker-scoped tools-dev
 runtime — `suite.ts`, `scope: 'worker'` — retaining daemon/config/project
@@ -64,6 +64,18 @@ multi-file groups accumulate carry-over — but only the full pool exercises the
 whole suite interleaved with mid-file shards, so treat it as the acceptance
 gate. New and repaired UI tests must hold the following invariants.
 
+The merge-gated `workspace-restoration` group also runs fully-parallel across
+its two worker-isolated tools-dev runtimes. Its cases must remain independent
+within the file as well as across files.
+
+- **Keep browser witnesses at cross-layer boundaries.** Before adding a UI
+  case, identify which assertions already belong to component or runtime tests
+  and which transition uniquely requires the running browser product. Extend
+  an existing browser workflow when it already owns the same project,
+  conversation, file, or retry setup; do not repeat that full setup only to
+  reassert a lower-layer state invariant. Retain one browser witness for each
+  distinct cross-layer transition, and keep its narrower ownership tests
+  explicit enough that future consolidation does not weaken coverage.
 - **Order independence is the contract.** Each test performs its own complete
   setup — whatever that file's model requires — and never relies on a
   predecessor's side effects; any contiguous subset of the suite must pass
