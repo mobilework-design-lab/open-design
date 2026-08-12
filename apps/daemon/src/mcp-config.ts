@@ -451,6 +451,8 @@ export function buildAcpMcpServers(servers: McpServerConfig[]): AcpMcpServer[] {
 export interface OpenCodeConfigBuildOptions {
   allowedDirectories?: string[];
   extraConfig?: Record<string, unknown>;
+  /** MCP ids that must be disabled for this daemon-spawned process. */
+  disabledServerIds?: string[];
 }
 
 export function buildOpenCodeMcpConfigContent(
@@ -488,6 +490,13 @@ export function buildOpenCodeMcpConfigContent(
       entry.enabled = true;
       mcp[s.id] = entry;
     }
+  }
+  // A daemon-spawned OpenCode process may inherit the user's global MCP
+  // configuration. Emit explicit disabled entries so a sensitive/orchestration
+  // server cannot leak back in through that global config.
+  for (const id of options.disabledServerIds ?? []) {
+    const normalizedId = typeof id === 'string' ? id.trim() : '';
+    if (normalizedId) mcp[normalizedId] = { enabled: false };
   }
   const externalDirectory = buildOpenCodeExternalDirectoryAllowlist(
     options.allowedDirectories,

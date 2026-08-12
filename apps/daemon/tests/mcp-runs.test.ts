@@ -273,6 +273,66 @@ describe('public MCP discovery + generation tools', () => {
     expect(fetchMock.mock.calls.some((call) => String(call[0]).endsWith('/api/runs'))).toBe(false);
   });
 
+  it('generate_from_discovery starts a fresh generation conversation and enforces project-relative writes', async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/api/discovery-sessions/discovery-ready')) {
+        return new Response(JSON.stringify({
+          session: {
+            id: 'discovery-ready',
+            status: 'ready',
+            projectId: 'project-1',
+            conversationId: 'discovery-conversation',
+          },
+          brief: '# Confirmed brief\nBuild a multi-file SaaS dashboard.',
+        }), { status: 200 });
+      }
+      if (url.endsWith('/api/projects/project-1/conversations') && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body));
+        expect(body).toEqual({
+          title: 'Generate from confirmed discovery',
+          sessionMode: 'design',
+        });
+        return new Response(JSON.stringify({
+          conversation: { id: 'generation-conversation', projectId: 'project-1' },
+        }), { status: 200 });
+      }
+      if (url.endsWith('/api/projects')) {
+        return new Response(JSON.stringify({ projects: [{ id: 'project-1', name: 'Demo' }] }), { status: 200 });
+      }
+      if (url.endsWith('/api/runs') && init?.method === 'POST') {
+        return new Response(JSON.stringify({
+          runId: 'generation-run',
+          conversationId: 'generation-conversation',
+        }), { status: 202 });
+      }
+      if (url.endsWith('/api/mcp/install-info')) {
+        return new Response(JSON.stringify({ webBaseUrl: null }), { status: 200 });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await handleMcpToolCall(
+      'http://127.0.0.1:17456',
+      'generate_from_discovery',
+      { sessionId: 'discovery-ready' },
+    );
+
+    const runsCall = fetchMock.mock.calls.find(
+      ([url, init]) => String(url).endsWith('/api/runs') && (init as RequestInit)?.method === 'POST',
+    );
+    const postBody = JSON.parse(String(runsCall?.[1]?.body));
+    expect(postBody.projectId).toBe('project-1');
+    expect(postBody.conversationId).toBe('generation-conversation');
+    expect(postBody.message).toContain('# Confirmed brief');
+    expect(postBody.message).toContain('use project-relative paths');
+    expect(postBody.message).toContain('Never construct or mix absolute Windows/WSL paths');
+    expect(JSON.parse(firstText(result))).toMatchObject({
+      runId: 'generation-run',
+      conversationId: 'generation-conversation',
+    });
+  });
+
   it('get_run returns status and, on success, a previewUrl built from the project entry file', async () => {
     const fetchMock = vi.fn(async (url: string) => {
       if (url.endsWith('/api/runs/run-42')) {
@@ -767,6 +827,226 @@ describe('public MCP discovery + generation tools', () => {
     expect(parsed.agentMessage).toContain('明白');
     expect(parsed.agentMessage).toContain('<question-form>');
     expect(parsed.previewUrl).toBeUndefined();
+  });
+
+  it('get_run reports unfinished zero-file delivery as incomplete instead of successful', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/runs/run-incomplete')) {
+        return new Response(JSON.stringify({
+          id: 'run-incomplete',
+          status: 'succeeded',
+          projectId: 'project-1',
+          artifactCount: 0,
+          endedWithUnfinishedWork: true,
+          eventsLogPath: '/tmp/run-incomplete/events.jsonl',
+        }), { status: 200 });
+      }
+      if (url.endsWith('/api/projects/project-1')) {
+        return new Response(JSON.stringify({ project: { id: 'project-1', metadata: {} } }), { status: 200 });
+      }
+      if (url.endsWith('/api/runs/run-incomplete/events')) {
+        return new Response(
+          sseEvents([{ event: 'agent', data: { type: 'text_delta', delta: 'I still need to write the files.' } }]),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith('/api/mcp/install-info')) {
+        return new Response(JSON.stringify({ webBaseUrl: null }), { status: 200 });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await handleMcpToolCall(
+      'http://127.0.0.1:17456',
+      'get_run',
+      { runId: 'run-incomplete' },
+    );
+    const parsed = JSON.parse(firstText(result));
+    expect(parsed).toMatchObject({
+      status: 'incomplete',
+      daemonStatus: 'succeeded',
+      deliveryStatus: 'incomplete',
+      failureReason: 'RUN_ENDED_WITH_UNFINISHED_WORK',
+      artifactCount: 0,
+      endedWithUnfinishedWork: true,
+    });
+    expect(parsed.hint).toContain('Do not describe this as a successful generation');
+    expect(parsed.hint).toContain('generate_from_discovery');
+  });
+
+  it('get_run rejects an HTML delivery whose stylesheet contains only root tokens', async () => {
+    const html = `<!doctype html><html><head><link rel="stylesheet" href="styles.css"></head><body><main><section>${'dashboard '.repeat(80)}</section></main></body></html>`;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/runs/run-token-css')) {
+        return new Response(JSON.stringify({
+          id: 'run-token-css',
+          status: 'succeeded',
+          projectId: 'project-1',
+          artifactCount: 1,
+        }), { status: 200 });
+      }
+      if (url.endsWith('/api/projects/project-1')) {
+        return new Response(JSON.stringify({
+          project: { id: 'project-1', metadata: { entryFile: 'index.html' } },
+        }), { status: 200 });
+      }
+      if (url.endsWith('/api/projects/project-1/raw/index.html')) {
+        return new Response(html, {
+          status: 200,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        });
+      }
+      if (url.endsWith('/api/projects/project-1/raw/styles.css')) {
+        return new Response(':root{--bg:white;--fg:black}', {
+          status: 200,
+          headers: { 'content-type': 'text/css; charset=utf-8' },
+        });
+      }
+      if (url.endsWith('/api/runs/run-token-css/events')) {
+        return new Response('', { status: 200 });
+      }
+      if (url.endsWith('/api/mcp/install-info')) {
+        return new Response(JSON.stringify({ webBaseUrl: null }), { status: 200 });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await handleMcpToolCall(
+      'http://127.0.0.1:17456',
+      'get_run',
+      { runId: 'run-token-css' },
+    );
+    const parsed = JSON.parse(firstText(result));
+    expect(parsed).toMatchObject({
+      status: 'incomplete',
+      daemonStatus: 'succeeded',
+      deliveryStatus: 'incomplete',
+      failureReason: 'DELIVERY_VALIDATION_FAILED',
+    });
+    expect(parsed.deliveryValidation.status).toBe('incomplete');
+    expect(parsed.deliveryValidation.issues).toContainEqual(expect.objectContaining({
+      code: 'CSS_HAS_NO_RENDER_RULES',
+      path: 'styles.css',
+    }));
+  });
+
+  it('get_run rejects an HTML delivery with a missing local dependency', async () => {
+    const html = `<!doctype html><html><head><link rel="stylesheet" href="styles.css"></head><body><main><section>${'dashboard '.repeat(80)}</section></main><script src="app.js"></script></body></html>`;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/runs/run-missing-js')) {
+        return new Response(JSON.stringify({
+          id: 'run-missing-js',
+          status: 'succeeded',
+          projectId: 'project-1',
+          artifactCount: 1,
+        }), { status: 200 });
+      }
+      if (url.endsWith('/api/projects/project-1')) {
+        return new Response(JSON.stringify({
+          project: { id: 'project-1', metadata: { entryFile: 'index.html' } },
+        }), { status: 200 });
+      }
+      if (url.endsWith('/api/projects/project-1/raw/index.html')) {
+        return new Response(html, {
+          status: 200,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        });
+      }
+      if (url.endsWith('/api/projects/project-1/raw/styles.css')) {
+        return new Response(':root{--bg:white}body{margin:0;background:var(--bg)}', {
+          status: 200,
+          headers: { 'content-type': 'text/css; charset=utf-8' },
+        });
+      }
+      if (url.endsWith('/api/projects/project-1/raw/app.js')) {
+        return new Response('missing', { status: 404 });
+      }
+      if (url.endsWith('/api/runs/run-missing-js/events')) {
+        return new Response('', { status: 200 });
+      }
+      if (url.endsWith('/api/mcp/install-info')) {
+        return new Response(JSON.stringify({ webBaseUrl: null }), { status: 200 });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await handleMcpToolCall(
+      'http://127.0.0.1:17456',
+      'get_run',
+      { runId: 'run-missing-js' },
+    );
+    const parsed = JSON.parse(firstText(result));
+    expect(parsed.status).toBe('incomplete');
+    expect(parsed.deliveryValidation.issues).toContainEqual(expect.objectContaining({
+      code: 'MISSING_LOCAL_REFERENCE',
+      path: 'app.js',
+    }));
+  });
+
+  it('get_run accepts a substantive static HTML delivery', async () => {
+    const html = `<!doctype html><html><head><link rel="stylesheet" href="styles.css"></head><body><main><nav>Workspace</nav><section>${'dashboard '.repeat(80)}</section></main><script src="app.js"></script></body></html>`;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/runs/run-valid-web')) {
+        return new Response(JSON.stringify({
+          id: 'run-valid-web',
+          status: 'succeeded',
+          projectId: 'project-1',
+          artifactCount: 1,
+        }), { status: 200 });
+      }
+      if (url.endsWith('/api/projects/project-1')) {
+        return new Response(JSON.stringify({
+          project: { id: 'project-1', metadata: { entryFile: 'index.html' } },
+        }), { status: 200 });
+      }
+      if (url.endsWith('/api/projects/project-1/raw/index.html')) {
+        return new Response(html, {
+          status: 200,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        });
+      }
+      if (url.endsWith('/api/projects/project-1/raw/styles.css')) {
+        return new Response(':root{--bg:white}body{margin:0;background:var(--bg)}.dashboard{display:grid}', {
+          status: 200,
+          headers: { 'content-type': 'text/css; charset=utf-8' },
+        });
+      }
+      if (url.endsWith('/api/projects/project-1/raw/app.js')) {
+        return new Response('document.documentElement.dataset.ready = "true";', {
+          status: 200,
+          headers: { 'content-type': 'text/javascript; charset=utf-8' },
+        });
+      }
+      if (url.endsWith('/api/runs/run-valid-web/events')) {
+        return new Response('', { status: 200 });
+      }
+      if (url.endsWith('/api/mcp/install-info')) {
+        return new Response(JSON.stringify({ webBaseUrl: null }), { status: 200 });
+      }
+      throw new Error(`unexpected url ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await handleMcpToolCall(
+      'http://127.0.0.1:17456',
+      'get_run',
+      { runId: 'run-valid-web' },
+    );
+    const parsed = JSON.parse(firstText(result));
+    expect(parsed.status).toBe('succeeded');
+    expect(parsed.deliveryValidation).toMatchObject({
+      status: 'valid',
+      entryFile: 'index.html',
+      metrics: {
+        checkedFileCount: 3,
+        htmlFileCount: 1,
+        cssFileCount: 1,
+        jsFileCount: 1,
+      },
+    });
   });
 
   it('get_run still includes agentMessage even when previewUrl is present', async () => {

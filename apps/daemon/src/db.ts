@@ -174,6 +174,26 @@ function migrate(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_conv_project
       ON conversations(project_id, updated_at DESC);
 
+    CREATE TABLE IF NOT EXISTS discovery_sessions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      conversation_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      initial_request TEXT NOT NULL DEFAULT '',
+      form_json TEXT NOT NULL,
+      answers_json TEXT NOT NULL,
+      submission_action TEXT,
+      additional_context TEXT NOT NULL DEFAULT '',
+      current_question_index INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+      FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_discovery_sessions_conversation
+      ON discovery_sessions(conversation_id, updated_at DESC);
+
     CREATE TABLE IF NOT EXISTS agent_sessions (
       conversation_id TEXT NOT NULL,
       agent_id        TEXT NOT NULL,
@@ -380,6 +400,16 @@ function migrate(db: SqliteDb): void {
   }
   if (!conversationCols.some((c: DbRow) => c.name === 'intent_signals_json')) {
     db.exec(`ALTER TABLE conversations ADD COLUMN intent_signals_json TEXT`);
+  }
+  const discoverySessionCols = db.prepare(`PRAGMA table_info(discovery_sessions)`).all() as DbRow[];
+  if (!discoverySessionCols.some((c: DbRow) => c.name === 'initial_request')) {
+    db.exec(`ALTER TABLE discovery_sessions ADD COLUMN initial_request TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!discoverySessionCols.some((c: DbRow) => c.name === 'submission_action')) {
+    db.exec(`ALTER TABLE discovery_sessions ADD COLUMN submission_action TEXT`);
+  }
+  if (!discoverySessionCols.some((c: DbRow) => c.name === 'additional_context')) {
+    db.exec(`ALTER TABLE discovery_sessions ADD COLUMN additional_context TEXT NOT NULL DEFAULT ''`);
   }
   const messageCols = db.prepare(`PRAGMA table_info(messages)`).all() as DbRow[];
   if (!messageCols.some((c: DbRow) => c.name === 'agent_id')) {

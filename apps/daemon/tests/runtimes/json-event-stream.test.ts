@@ -76,6 +76,40 @@ test('opencode json stream emits tool events', () => {
   ]);
 });
 
+test('opencode json stream preserves failed tool states as error results', () => {
+  const { events, handler } = collectEvents('opencode');
+
+  handler.feed(
+    JSON.stringify({
+      type: 'tool_use',
+      part: {
+        tool: 'apply_patch',
+        callID: 'call-failed-patch',
+        state: {
+          input: JSON.stringify({ patchText: '*** Begin Patch\\n*** End Patch' }),
+          error: 'apply_patch verification failed: path is outside the workspace',
+          status: 'error',
+        },
+      },
+    }) + '\n',
+  );
+
+  assert.deepEqual(events, [
+    {
+      type: 'tool_use',
+      id: 'call-failed-patch',
+      name: 'apply_patch',
+      input: { patchText: '*** Begin Patch\\n*** End Patch' },
+    },
+    {
+      type: 'tool_result',
+      toolUseId: 'call-failed-patch',
+      content: 'apply_patch verification failed: path is outside the workspace',
+      isError: true,
+    },
+  ]);
+});
+
 test('opencode json stream emits structured errors as error events', () => {
   const { events, handler } = collectEvents('opencode');
 

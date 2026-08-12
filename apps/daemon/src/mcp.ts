@@ -33,6 +33,7 @@ import {
   ANALYTICS_HEADER_REQUEST_ID,
   ANALYTICS_HEADER_SESSION_ID,
   buildProjectRawFileUrl,
+  findFirstQuestionForm,
   type McpAnalyticsContextResponse,
   type WorkspaceProjectsResponse,
 } from '@open-design/contracts';
@@ -90,10 +91,16 @@ interface ProjectPayload { project?: ProjectSummary; id?: string; name?: string;
 interface ActiveContext { active?: boolean; projectId?: string; projectName?: string | null; fileName?: string | null; ageMs?: number | null }
 type ResolvedProject = { id: string; name: string; source: 'uuid' | 'id' | 'exact' | 'slug' | 'substring' };
 interface ProjectListCache { baseUrl: string; t: number; list: ProjectSummary[] }
-interface McpArgs extends JsonObject { project?: unknown; entry?: unknown; include?: unknown; maxBytes?: unknown; path?: unknown; offset?: unknown; limit?: unknown; since?: unknown; query?: unknown; pattern?: unknown; max?: unknown; name?: unknown; content?: unknown; encoding?: unknown; artifactManifest?: unknown; confirm?: unknown; prompt?: unknown; plugin?: unknown; inputs?: unknown; agent?: unknown; model?: unknown; serviceTier?: unknown; apiKey?: unknown; requestId?: unknown; resume?: unknown; runId?: unknown; id?: unknown; designSystem?: unknown; skill?: unknown; skills?: string[]; includeUnavailable?: unknown; artifactType?: unknown; projectTitle?: unknown; locale?: unknown; knownAnswers?: unknown; skip?: unknown; briefDraftId?: unknown; nonce?: unknown; answers?: unknown; externalPluginContext?: unknown; pluginWorkflowId?: unknown }
+interface McpArgs extends JsonObject { project?: unknown; entry?: unknown; include?: unknown; maxBytes?: unknown; path?: unknown; offset?: unknown; limit?: unknown; since?: unknown; query?: unknown; pattern?: unknown; max?: unknown; name?: unknown; content?: unknown; encoding?: unknown; artifactManifest?: unknown; confirm?: unknown; prompt?: unknown; initialRequest?: unknown; action?: unknown; additionalContext?: unknown; plugin?: unknown; inputs?: unknown; agent?: unknown; model?: unknown; serviceTier?: unknown; apiKey?: unknown; requestId?: unknown; resume?: unknown; runId?: unknown; id?: unknown; sessionId?: unknown; conversationId?: unknown; questionId?: unknown; answer?: unknown; answers?: unknown; form?: unknown; designSystem?: unknown; skill?: unknown; skills?: string[]; includeUnavailable?: unknown; artifactType?: unknown; projectTitle?: unknown; locale?: unknown; knownAnswers?: unknown; skip?: unknown; briefDraftId?: unknown; nonce?: unknown; externalPluginContext?: unknown; pluginWorkflowId?: unknown }
 interface ProjectFileBundleEntry { name: string; mime: string; size: number | null; content: string | null; binary: boolean }
 interface BundleInput { project: ProjectPayload | ProjectSummary; entry: string; files: ProjectFileBundleEntry[]; truncated: boolean; skippedFileCount?: number; active: ActiveContext | null; resolved?: ResolvedProject | null }
 interface ErrorWithCode { message?: string; code?: string; cause?: { code?: string } }
+interface PendingDiscoveryRun {
+  initialRequest: string;
+  discoveryResponse?: JsonObject;
+}
+
+const pendingDiscoveryRuns = new Map<string, PendingDiscoveryRun>();
 interface HandleMcpToolCallOptions {
   briefStore?: LocalMcpBriefStore;
   analyticsHeaders?: Record<string, string>;
@@ -676,6 +683,133 @@ export const TOOL_DEFS = [
       additionalProperties: false,
     },
     annotations: { ...WRITE_ANNOTATIONS, title: 'Create Open Design project' },
+  },
+  {
+    name: 'begin_discovery',
+    description:
+      'Ask the Open Design inner agent to turn a natural-language design request into one complete question-form without creating files. Poll get_run; when this discovery run succeeds, get_run automatically parses and persists the form as a discovery session and returns it for exact display.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: PROJECT_ARG,
+        prompt: { type: 'string', description: 'The user\'s natural-language design request.' },
+        agent: { type: 'string', description: 'Optional Open Design inner agent id.' },
+        model: { type: 'string', description: 'Optional model override.' },
+      },
+      required: ['prompt'],
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, title: 'Begin Open Design discovery' },
+  },
+  {
+    name: 'start_discovery',
+    description:
+      'Persist a complete Open Design single-shot question form together with the user\'s original request. Show the full form, including its options and recommendations, and wait for the user to review, accept defaults, skip, or provide answers; never submit inferred answers.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: PROJECT_ARG,
+        conversationId: { type: 'string', description: 'Conversation id. If omitted, the project default conversation is used.' },
+        id: { type: 'string', description: 'Optional discovery session id.' },
+        initialRequest: {
+          type: 'string',
+          description: 'The user\'s exact original design request. Preserve it verbatim so skipped or partial forms still have useful generation context.',
+        },
+        form: {
+          type: 'object',
+          description: 'Question form produced by Open Design. Must contain id, title, and a non-empty questions array.',
+          additionalProperties: true,
+        },
+      },
+      required: ['form'],
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, title: 'Start Open Design discovery' },
+  },
+  {
+    name: 'get_discovery',
+    description: 'Read the persisted discovery session, including the complete form and answers collected so far.',
+    inputSchema: {
+      type: 'object',
+      properties: { sessionId: { type: 'string', description: 'Discovery session id returned by start_discovery.' } },
+      required: ['sessionId'],
+      additionalProperties: false,
+    },
+    annotations: { ...READ_ANNOTATIONS, title: 'Read discovery session' },
+  },
+  {
+    name: 'submit_discovery',
+    description:
+      'Finalize the Open Design single-shot form after the user explicitly chooses an action: submit answers, accept recommended defaults, or skip the form. Optional additionalContext preserves free-form requirements outside the listed options. Never infer an action or answer. The result includes the persisted brief.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string', description: 'Discovery session id returned by start_discovery.' },
+        action: {
+          type: 'string',
+          enum: ['submit', 'accept_defaults', 'skip'],
+          description: 'The user\'s explicit choice. submit uses answers; accept_defaults uses form defaults; skip proceeds from the original request without form answers.',
+        },
+        answers: {
+          type: 'object',
+          description: 'Map from question id to user-confirmed answers. Optional for accept_defaults or skip. A null value explicitly skips one question.',
+          additionalProperties: true,
+        },
+        additionalContext: {
+          type: 'string',
+          description: 'User-provided requirements, corrections, or preferences that do not fit the form options.',
+        },
+      },
+      required: ['sessionId', 'action'],
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, title: 'Submit Open Design discovery form' },
+  },
+  {
+    name: 'generate_from_discovery',
+    description:
+      'Start exactly one Open Design generation run from a persisted ready discovery session. This reads the original request and confirmed brief from the daemon, so the outer agent must not copy, rewrite, summarize, or supplement the brief. Returns the normal runId for get_run polling.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string', description: 'A ready discovery session id returned by submit_discovery.' },
+        skill: { type: 'string', description: 'Optional Open Design skill id.' },
+        plugin: { type: 'string', description: 'Optional Open Design plugin id.' },
+        inputs: { type: 'object', additionalProperties: true, description: 'Optional plugin inputs.' },
+        agent: { type: 'string', description: 'Optional inner agent override.' },
+        model: { type: 'string', description: 'Optional model override.' },
+        serviceTier: { type: 'string', description: 'Optional service tier override.' },
+      },
+      required: ['sessionId'],
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, title: 'Generate from confirmed discovery' },
+  },
+  {
+    name: 'answer_discovery',
+    description: 'Legacy sequential-interview helper. The primary scheme-2A path is submit_discovery with the complete form answers.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string', description: 'Discovery session id.' },
+        questionId: { type: 'string', description: 'The id of the current question.' },
+        answer: { description: 'The user answer. Its JSON type follows the question type.' },
+      },
+      required: ['sessionId', 'questionId', 'answer'],
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, title: 'Answer discovery question' },
+  },
+  {
+    name: 'cancel_discovery',
+    description: 'Cancel a persisted discovery session so it cannot accept further answers.',
+    inputSchema: {
+      type: 'object',
+      properties: { sessionId: { type: 'string', description: 'Discovery session id.' } },
+      required: ['sessionId'],
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, title: 'Cancel discovery session' },
   },
   // Discovery + generation. An external coding agent does NOT run a
   // skill itself — it commissions Open Design to, via start_run. The
@@ -1734,6 +1868,21 @@ export async function runMcpStdio(options: RunMcpOptions): Promise<void> {
         '    and a hint to pull the files with get_artifact.',
         ' - cancel_run(runId) aborts an in-flight run.',
         '',
+        'Discovery for vague design requests (single-form scheme 2-A):',
+        ' - begin_discovery(project, prompt) asks the inner Open Design agent',
+        '    to produce one complete question-form without writing files.',
+        ' - Poll that run with get_run, parse its question-form, then call',
+        '    start_discovery(project, form, initialRequest). Preserve the',
+        '    user\'s exact request in initialRequest and show the entire form.',
+        ' - Wait for an explicit user decision. submit_discovery supports',
+        '    action=submit with answers, action=accept_defaults, or action=skip.',
+        '    Put requirements outside the offered choices in additionalContext.',
+        '    Never silently choose defaults or manufacture missing answers.',
+        ' - After submit_discovery returns ready, call generate_from_discovery',
+        '    with only the sessionId. Do NOT copy its brief into start_run:',
+        '    generate_from_discovery reads the persisted authoritative brief',
+        '    and starts exactly one generation run itself.',
+        '',
         'Generation patience: Open Design runs typically take 5–30',
         'minutes. Polls returning status:running with unchanged file',
         'mtimes is the inner agent thinking, not a hang. Do NOT cancel',
@@ -2006,6 +2155,13 @@ const PROJECT_OR_RUN_TOOLS = new Set([
   'delete_project',
   'create_project',
   'create_artifact',
+  'begin_discovery',
+  'start_discovery',
+  'get_discovery',
+  'submit_discovery',
+  'generate_from_discovery',
+  'answer_discovery',
+  'cancel_discovery',
   'start_run',
   'get_run',
   'cancel_run',
@@ -2192,6 +2348,20 @@ async function handleMcpToolCall(
         return await deleteProject(baseUrl, args, headers);
       case 'create_project':
         return await createProject(baseUrl, args, headers);
+      case 'begin_discovery':
+        return await beginDiscovery(baseUrl, args, options, headers);
+      case 'start_discovery':
+        return await startDiscovery(baseUrl, args, headers);
+      case 'get_discovery':
+        return await getDiscovery(baseUrl, args, headers);
+      case 'submit_discovery':
+        return await submitDiscovery(baseUrl, args, headers);
+      case 'generate_from_discovery':
+        return await generateFromDiscovery(baseUrl, args, options, headers);
+      case 'answer_discovery':
+        return await answerDiscovery(baseUrl, args, headers);
+      case 'cancel_discovery':
+        return await cancelDiscovery(baseUrl, args, headers);
       case 'list_skills':
         return ok(await getJson<SkillsPayload>(`${baseUrl}/api/skills`));
       case 'list_plugins':
@@ -2390,6 +2560,258 @@ async function createProject(
   }
 }
 
+async function beginDiscovery(
+  baseUrl: string,
+  args: McpArgs,
+  options: HandleMcpToolCallOptions = {},
+  headers?: Record<string, string>,
+) {
+  requireString(args.prompt, 'prompt');
+  const discoveryPrompt = [
+    'You are in Open Design discovery-only mode.',
+    'Do not create, modify, or write any files.',
+    'Do not start implementation or generation.',
+    'Convert the user request below into exactly one complete <question-form> block.',
+    'Ask only high-value questions needed to decide the design direction and implementation shape.',
+    'Use Open Design\'s single-shot brief style: at most five high-value questions may cover the major dimensions of the request.',
+    'Recommended default/defaultValue fields are allowed and should be clearly treated as suggestions, never as user answers.',
+    'The form must be valid JSON with id, title, and a non-empty questions array.',
+    'Each question needs id, label, and type; use options for a small set of choices when useful. Do not claim the user selected a recommendation unless the user explicitly confirms it.',
+    'Return the question-form block as the final assistant message so the outer agent can parse it.',
+    '',
+    'User request:',
+    String(args.prompt),
+  ].join('\n');
+  const result = await startRun(
+    baseUrl,
+    { ...args, prompt: discoveryPrompt },
+    options,
+    headers,
+  );
+  const payload = readMcpTextPayload(result);
+  const runId = typeof payload?.runId === 'string'
+    ? payload.runId
+    : typeof payload?.id === 'string'
+      ? payload.id
+      : null;
+  if (runId) {
+    pendingDiscoveryRuns.set(runId, { initialRequest: String(args.prompt) });
+  }
+  return result;
+}
+
+function readMcpTextPayload(result: unknown): JsonObject | null {
+  if (!result || typeof result !== 'object') return null;
+  const content = (result as { content?: unknown }).content;
+  if (!Array.isArray(content)) return null;
+  const first = content[0];
+  if (!first || typeof first !== 'object' || typeof (first as { text?: unknown }).text !== 'string') {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse((first as { text: string }).text);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as JsonObject
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function startDiscovery(
+  baseUrl: string,
+  args: McpArgs,
+  headers?: Record<string, string>,
+) {
+  const { id, resolved, active } = await resolveProjectArg(baseUrl, args.project, headers);
+  if (!args.form || typeof args.form !== 'object' || Array.isArray(args.form)) {
+    throw new Error('form must be an object produced by Open Design');
+  }
+  const form = args.form as JsonObject;
+  if (
+    typeof form.id !== 'string' ||
+    typeof form.title !== 'string' ||
+    !Array.isArray(form.questions) ||
+    form.questions.length === 0
+  ) {
+    throw new Error('form must contain id, title, and a non-empty questions array');
+  }
+  const conversationId =
+    typeof args.conversationId === 'string' && args.conversationId.length > 0
+      ? args.conversationId
+      : await getDefaultConversationId(baseUrl, id, headers);
+  requireString(conversationId, 'conversationId');
+  const body: JsonObject = {
+    projectId: id,
+    conversationId,
+    form,
+    initialRequest: typeof args.initialRequest === 'string' ? args.initialRequest : '',
+  };
+  if (typeof args.id === 'string' && args.id.length > 0) body.id = args.id;
+  return ok(
+    withActiveEcho(
+      await postJson<JsonObject>(`${baseUrl}/api/discovery-sessions`, body, headers ?? {}),
+      active,
+      resolved,
+    ),
+  );
+}
+
+async function getDiscovery(
+  baseUrl: string,
+  args: McpArgs,
+  headers?: Record<string, string>,
+) {
+  requireString(args.sessionId, 'sessionId');
+  return ok(
+    await getJson<JsonObject>(
+      `${baseUrl}/api/discovery-sessions/${encodeURIComponent(String(args.sessionId))}`,
+      headers,
+    ),
+  );
+}
+
+async function submitDiscovery(
+  baseUrl: string,
+  args: McpArgs,
+  headers?: Record<string, string>,
+) {
+  requireString(args.sessionId, 'sessionId');
+  requireString(args.action, 'action');
+  if (args.action !== 'submit' && args.action !== 'accept_defaults' && args.action !== 'skip') {
+    throw new Error('action must be submit, accept_defaults, or skip');
+  }
+  if (
+    args.answers !== undefined &&
+    (!args.answers || typeof args.answers !== 'object' || Array.isArray(args.answers))
+  ) {
+    throw new Error('answers must be an object when provided');
+  }
+  if (args.additionalContext !== undefined && typeof args.additionalContext !== 'string') {
+    throw new Error('additionalContext must be a string when provided');
+  }
+  return ok(
+    await postJson<JsonObject>(
+      `${baseUrl}/api/discovery-sessions/${encodeURIComponent(String(args.sessionId))}/submit`,
+      {
+        action: args.action,
+        answers: args.answers ?? {},
+        additionalContext: args.additionalContext ?? '',
+      },
+      headers ?? {},
+    ),
+  );
+}
+
+async function generateFromDiscovery(
+  baseUrl: string,
+  args: McpArgs,
+  options: HandleMcpToolCallOptions = {},
+  headers?: Record<string, string>,
+) {
+  requireString(args.sessionId, 'sessionId');
+  const discovery = await getJson<JsonObject>(
+    `${baseUrl}/api/discovery-sessions/${encodeURIComponent(args.sessionId)}`,
+    headers,
+  );
+  const session = discovery.session;
+  if (!session || typeof session !== 'object' || Array.isArray(session)) {
+    throw new Error('discovery session response is invalid');
+  }
+  const persisted = session as JsonObject;
+  if (persisted.status !== 'ready') {
+    throw new Error(`discovery session must be ready before generation (current: ${String(persisted.status)})`);
+  }
+  requireString(persisted.projectId, 'discovery session projectId');
+  requireString(discovery.brief, 'discovery brief');
+  // Discovery and generation have different responsibilities. The discovery
+  // agent only produces the form; resuming that native CLI session during the
+  // build can carry discovery-only instructions and an interrupted tool state
+  // into generation. Persist the brief in our own discovery session, then
+  // start the build in a fresh Open Design conversation/native agent session.
+  const conversationResponse = await postJson<JsonObject>(
+    `${baseUrl}/api/projects/${encodeURIComponent(String(persisted.projectId))}/conversations`,
+    {
+      title: 'Generate from confirmed discovery',
+      sessionMode: 'design',
+    },
+    headers ?? {},
+  );
+  const generationConversation = conversationResponse.conversation;
+  if (
+    !generationConversation ||
+    typeof generationConversation !== 'object' ||
+    Array.isArray(generationConversation)
+  ) {
+    throw new Error('generation conversation response is invalid');
+  }
+  requireString(
+    (generationConversation as JsonObject).id,
+    'generation conversation id',
+  );
+  const generationPrompt = [
+    'Generate the project from the confirmed Open Design discovery brief below.',
+    'Treat the brief as authoritative. Do not run discovery again, ask new questions, rewrite the brief, or substitute different requirements.',
+    'Create and save the requested project files with a runnable preview entry.',
+    'Filesystem contract: write every deliverable inside the active project directory only. For Write, Edit, and apply_patch, use project-relative paths such as index.html, styles.css, app.js, or pages/analytics.html. Never construct or mix absolute Windows/WSL paths (for example D:\\..., /mnt/d/..., or /mnt/D:/...).',
+    'If one file operation fails, read its tool error, correct the path or patch, and continue. Before finishing, verify that the requested files exist in the active project directory. Do not report completion while any build todo remains pending or in progress.',
+    '',
+    discovery.brief,
+  ].join('\n');
+  return startRun(
+    baseUrl,
+    {
+      project: persisted.projectId,
+      conversationId: (generationConversation as JsonObject).id,
+      prompt: generationPrompt,
+      skill: args.skill,
+      ...(Array.isArray(args.skills) && args.skills.length > 0
+        ? { skills: args.skills }
+        : {}),
+      plugin: args.plugin,
+      inputs: args.inputs,
+      agent: args.agent,
+      model: args.model,
+      serviceTier: args.serviceTier,
+      requestId: args.requestId,
+    },
+    options,
+    headers,
+  );
+}
+
+async function answerDiscovery(
+  baseUrl: string,
+  args: McpArgs,
+  headers?: Record<string, string>,
+) {
+  requireString(args.sessionId, 'sessionId');
+  requireString(args.questionId, 'questionId');
+  if (args.answer === undefined) throw new Error('answer is required');
+  return ok(
+    await postJson<JsonObject>(
+      `${baseUrl}/api/discovery-sessions/${encodeURIComponent(String(args.sessionId))}/answer`,
+      { questionId: args.questionId, answer: args.answer },
+      headers ?? {},
+    ),
+  );
+}
+
+async function cancelDiscovery(
+  baseUrl: string,
+  args: McpArgs,
+  headers?: Record<string, string>,
+) {
+  requireString(args.sessionId, 'sessionId');
+  return ok(
+    await postJson<JsonObject>(
+      `${baseUrl}/api/discovery-sessions/${encodeURIComponent(String(args.sessionId))}/cancel`,
+      {},
+      headers ?? {},
+    ),
+  );
+}
+
 // Flatten daemon's plugin record into the few fields an external agent
 // needs to pick a plugin: id, title, description, kind, tags. The raw
 // record carries 16+ fields (fsPath, sourceMarketplaceId, installedAt,
@@ -2519,6 +2941,9 @@ async function startRun(
     if (typeof args.resume !== 'boolean') throw new Error('resume must be a boolean');
     body.resume = args.resume;
   }
+  if (typeof args.conversationId === 'string' && args.conversationId.length > 0) {
+    body.conversationId = args.conversationId;
+  }
   if (typeof args.prompt === 'string' && args.prompt.length > 0) {
     body.message = args.prompt;
     body.currentPrompt = args.prompt;
@@ -2572,6 +2997,227 @@ async function startRun(
       resolved,
     ),
   );
+}
+
+type StaticDeliveryStatus = 'valid' | 'incomplete' | 'unavailable' | 'not_applicable';
+
+function htmlAttribute(tag: string, name: string): string | null {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = tag.match(
+    new RegExp(`\\b${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i'),
+  );
+  return match ? (match[1] ?? match[2] ?? match[3] ?? null) : null;
+}
+
+function stylesheetReferences(html: string): string[] {
+  const refs: string[] = [];
+  for (const match of html.matchAll(/<link\b[^>]*>/gi)) {
+    const tag = match[0];
+    const rel = htmlAttribute(tag, 'rel');
+    const href = htmlAttribute(tag, 'href');
+    if (href && rel?.split(/\s+/).some((value) => value.toLowerCase() === 'stylesheet')) {
+      refs.push(href);
+    }
+  }
+  return refs;
+}
+
+function countCssRenderRules(css: string): number {
+  const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  let count = 0;
+  // This deliberately stays a conservative static check rather than a full
+  // CSS parser. It catches the important failure mode where a generated
+  // stylesheet contains only :root tokens, while accepting ordinary rules
+  // nested inside media/container queries.
+  for (const match of withoutComments.matchAll(/([^{}]+)\{[^{}]*}/g)) {
+    const selector = (match[1] ?? '').trim();
+    if (!selector || selector.startsWith('@')) continue;
+    const meaningful = selector
+      .split(',')
+      .map((part) => part.trim().toLowerCase())
+      .some((part) =>
+        Boolean(
+          part &&
+          part !== ':root' &&
+          part !== 'from' &&
+          part !== 'to' &&
+          !/^\d+(?:\.\d+)?%$/.test(part),
+        ),
+      );
+    if (meaningful) count += 1;
+  }
+  return count;
+}
+
+function localStylesheetPath(raw: string, fromPath: string): string | null {
+  if (/^(?:https?:|\/\/|data:)/i.test(raw)) return null;
+  const dir = fromPath.includes('/')
+    ? fromPath.slice(0, fromPath.lastIndexOf('/') + 1)
+    : '';
+  const resolved = raw.startsWith('/') ? raw.slice(1) : dir + raw;
+  const stripped = resolved.replace(/[?#].*$/, '');
+  const segments = stripped.split('/').filter(Boolean);
+  const output: string[] = [];
+  for (const segment of segments) {
+    if (segment === '.') continue;
+    if (segment === '..') {
+      if (output.length === 0) return null;
+      output.pop();
+      continue;
+    }
+    output.push(segment);
+  }
+  return output.length > 0 ? output.join('/') : null;
+}
+
+async function validateStaticWebDelivery(
+  baseUrl: string,
+  projectId: string,
+  entryFile: string,
+  headers?: Record<string, string>,
+): Promise<JsonObject> {
+  if (!/\.html?$/i.test(entryFile)) {
+    return { status: 'not_applicable' satisfies StaticDeliveryStatus, entryFile };
+  }
+
+  let entry: ProjectFileBundleEntry;
+  try {
+    entry = await fetchProjectFile(baseUrl, projectId, entryFile, 1_000_000, headers);
+  } catch (error) {
+    const message = errorMessage(error);
+    if (/daemon\s+404\b/i.test(message)) {
+      return {
+        status: 'incomplete' satisfies StaticDeliveryStatus,
+        entryFile,
+        checkedFiles: [],
+        issues: [{ code: 'ENTRY_FILE_NOT_FOUND', path: entryFile, message }],
+      };
+    }
+    return {
+      status: 'unavailable' satisfies StaticDeliveryStatus,
+      entryFile,
+      reason: message,
+    };
+  }
+
+  const files = new Map<string, ProjectFileBundleEntry>([[entryFile, entry]]);
+  const issues: JsonObject[] = [];
+  const queue = extractRelativeRefs(entry.content ?? '', entryFile, entry.mime)
+    .map((path) => ({ path, depth: 1 }));
+  const queued = new Set(queue.map((item) => item.path));
+  const maxFiles = 40;
+  let validationUnavailableReason: string | null = null;
+
+  while (queue.length > 0 && files.size < maxFiles) {
+    const next = queue.shift();
+    if (!next || files.has(next.path)) continue;
+    try {
+      const file = await fetchProjectFile(baseUrl, projectId, next.path, 1_000_000, headers);
+      files.set(next.path, file);
+      if (next.depth < 2 && !file.binary && typeof file.content === 'string') {
+        for (const ref of extractRelativeRefs(file.content, next.path, file.mime)) {
+          if (!files.has(ref) && !queued.has(ref)) {
+            queued.add(ref);
+            queue.push({ path: ref, depth: next.depth + 1 });
+          }
+        }
+      }
+    } catch (error) {
+      const message = errorMessage(error);
+      if (/daemon\s+404\b/i.test(message)) {
+        issues.push({
+          code: 'MISSING_LOCAL_REFERENCE',
+          path: next.path,
+          message: `Referenced local file "${next.path}" was not found.`,
+        });
+      } else {
+        validationUnavailableReason ??= message;
+      }
+    }
+  }
+
+  const entryHtml = entry.content ?? '';
+  if (
+    entryHtml.trim().length < 500 ||
+    !/<body\b/i.test(entryHtml) ||
+    !/<(?:main|section|article|nav|form|table)\b/i.test(entryHtml)
+  ) {
+    issues.push({
+      code: 'HTML_ENTRY_TOO_THIN',
+      path: entryFile,
+      message: 'The HTML entry is too small or lacks meaningful page structure.',
+    });
+  }
+
+  const stylesheetHrefs = stylesheetReferences(entryHtml);
+  const inlineStyles = [...entryHtml.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)]
+    .map((match) => match[1] ?? '');
+  const localStylesheets = stylesheetHrefs
+    .map((href) => localStylesheetPath(href, entryFile))
+    .filter((value): value is string => Boolean(value));
+  const externalStylesheetCount = stylesheetHrefs.length - localStylesheets.length;
+  const fetchedCss = [...files.values()].filter(
+    (file) => isCssLike(file.mime, file.name) && typeof file.content === 'string',
+  );
+
+  if (localStylesheets.length === 0 && externalStylesheetCount === 0 && inlineStyles.length === 0) {
+    issues.push({
+      code: 'NO_PRESENTATIONAL_STYLES',
+      path: entryFile,
+      message: 'The HTML entry has no linked or inline stylesheet.',
+    });
+  }
+
+  for (const css of fetchedCss) {
+    if (countCssRenderRules(css.content ?? '') === 0) {
+      issues.push({
+        code: 'CSS_HAS_NO_RENDER_RULES',
+        path: css.name,
+        message: 'The stylesheet contains tokens or at-rules but no rules that style page elements.',
+      });
+    }
+  }
+  if (
+    inlineStyles.length > 0 &&
+    localStylesheets.length === 0 &&
+    externalStylesheetCount === 0 &&
+    inlineStyles.every((css) => countCssRenderRules(css) === 0)
+  ) {
+    issues.push({
+      code: 'INLINE_CSS_HAS_NO_RENDER_RULES',
+      path: entryFile,
+      message: 'Inline CSS contains no rules that style page elements.',
+    });
+  }
+
+  const metrics: JsonObject = {
+    checkedFileCount: files.size,
+    htmlFileCount: [...files.values()].filter((file) => isHtmlLike(file.mime, file.name)).length,
+    cssFileCount: fetchedCss.length,
+    jsFileCount: [...files.values()].filter((file) => isJsLike(file.mime, file.name)).length,
+    totalTextBytes: [...files.values()].reduce(
+      (total, file) => total + (typeof file.content === 'string' ? file.content.length : 0),
+      0,
+    ),
+  };
+
+  if (validationUnavailableReason) {
+    return {
+      status: 'unavailable' satisfies StaticDeliveryStatus,
+      entryFile,
+      checkedFiles: [...files.keys()],
+      issues,
+      metrics,
+      reason: validationUnavailableReason,
+    };
+  }
+  return {
+    status: (issues.length > 0 ? 'incomplete' : 'valid') satisfies StaticDeliveryStatus,
+    entryFile,
+    checkedFiles: [...files.keys()],
+    issues,
+    metrics,
+  };
 }
 
 // Poll a run. On terminal status we enrich the daemon's status body
@@ -2656,10 +3302,108 @@ async function getRun(
     enriched.studioUrl = studioUrl;
     enriched.studioUrlLifetime = 'current_daemon_session';
   }
+  const parsedForm = agentMessage ? findFirstQuestionForm(agentMessage) : null;
+  if (parsedForm) {
+    const pending = pendingDiscoveryRuns.get(args.runId);
+    const discoveryResponse = await persistDiscoveryFromRun(
+      baseUrl,
+      args.runId,
+      status,
+      parsedForm.form,
+      pending?.initialRequest ?? (typeof status.currentPrompt === 'string' ? status.currentPrompt : ''),
+      headers,
+    );
+    pendingDiscoveryRuns.delete(args.runId);
+    enriched.questionForm = parsedForm.form;
+    enriched.discovery = discoveryResponse;
+    enriched.hint = 'This run produced a complete question-form. The daemon has already persisted it as a discovery session. Display discovery.session.form exactly, including every option and recommendation; do not summarize, rewrite, omit, answer, or submit it yourself. Wait for the user to fill it, explicitly accept defaults, or skip. Then call submit_discovery with discovery.session.id and the user\'s explicit action.';
+    return ok(enriched);
+  }
+  if (!hasAuthoritativeDeliverable && previewUrl && entryFile) {
+    const deliveryValidation = await validateStaticWebDelivery(
+      baseUrl,
+      status.projectId,
+      entryFile,
+      headers,
+    );
+    enriched.deliveryValidation = deliveryValidation;
+    if (deliveryValidation.status === 'incomplete') {
+      enriched.daemonStatus = status.status;
+      enriched.status = 'incomplete';
+      enriched.deliveryStatus = 'incomplete';
+      enriched.failureReason = 'DELIVERY_VALIDATION_FAILED';
+      enriched.hint = 'The inner agent process exited successfully, but static delivery validation found missing or materially incomplete files. Do not report generation success. Show deliveryValidation.issues to the user and repair or regenerate the project before presenting previewUrl as the deliverable.';
+      return ok(enriched);
+    }
+  }
+  if (
+    hasAuthoritativeDeliverable
+    && (status.deliverableValid !== true || status.deliverableValidation !== 'valid')
+  ) {
+    enriched.daemonStatus = status.status;
+    enriched.status = 'incomplete';
+    enriched.deliveryStatus = 'incomplete';
+    enriched.failureReason = 'DELIVERY_VALIDATION_FAILED';
+    enriched.hint = 'The run process exited successfully, but the daemon did not validate a complete deliverable. Do not report generation success or invent replacement files. Show the daemon deliverable validation fields to the user and retry generation through generate_from_discovery only when the user asks.';
+    return ok(enriched);
+  }
+  if (!previewUrl) {
+    if (status.endedWithUnfinishedWork === true) {
+      enriched.daemonStatus = status.status;
+      enriched.status = 'incomplete';
+      enriched.deliveryStatus = 'incomplete';
+      enriched.failureReason = 'RUN_ENDED_WITH_UNFINISHED_WORK';
+      enriched.hint = 'The inner agent process exited, but Open Design detected unfinished work and no preview file. Do not describe this as a successful generation. Relay agentMessage, report that the delivery is incomplete, and use eventsLogPath to inspect the last tool result. A new generation attempt must start through generate_from_discovery so it uses the persisted brief and a fresh generation conversation; never invent files or call start_run directly.';
+      return ok(enriched);
+    }
+    enriched.hint = 'Run finished but produced no files. Relay agentMessage to the user verbatim. Do not invent a replacement result or start another run unless the user explicitly asks. When studioUrl is present, show it as a clickable markdown link. eventsLogPath, when present, holds the full event log.';
+    return ok(enriched);
+  }
   enriched.hint = previewUrl
     ? `Run finished. artifactRef is the durable project/file identity. previewUrl and studioUrl are browser links for the current Open Design runtime only; if either stops working after Open Design restarts, call get_run again with this runId to obtain current links. Render previewUrl as a clickable link now. agentMessage carries the inner agent's explanation; show it alongside the link. Call get_artifact({ project: "${status.projectId}" }) when you need the source files — always pass project explicitly; omitting it falls back to the active project, which may differ. eventsLogPath, when present, holds the full inner-agent event log for forensics.`
     : 'Run finished but produced no files. The inner agent\'s output is in agentMessage — relay it to the user verbatim. Most often this is a clarifying question (e.g. a <question-form>) you should answer by calling start_run again with a more specific prompt or a chosen plugin. When studioUrl is present, show it as a clickable markdown link (`[Open Open Design studio](STUDIO_URL)`) so the user can navigate to the OD page that shows the chat history — never render it as inline code. eventsLogPath, when present, holds the full event log if you need to inspect what happened.';
   return ok(enriched);
+}
+
+async function persistDiscoveryFromRun(
+  baseUrl: string,
+  runId: string,
+  status: JsonObject,
+  form: unknown,
+  initialRequest: string,
+  headers?: Record<string, string>,
+): Promise<JsonObject> {
+  requireString(status.projectId, 'run projectId');
+  const conversationId =
+    typeof status.conversationId === 'string' && status.conversationId.length > 0
+      ? status.conversationId
+      : await getDefaultConversationId(baseUrl, status.projectId, headers);
+  requireString(conversationId, 'run conversationId');
+  const sessionId = `run-${runId}`;
+  try {
+    return await postJson<JsonObject>(
+      `${baseUrl}/api/discovery-sessions`,
+      {
+        id: sessionId,
+        projectId: status.projectId,
+        conversationId,
+        initialRequest,
+        form,
+      },
+      headers ?? {},
+    );
+  } catch (error) {
+    // get_run may be polled more than once after completion. A deterministic
+    // session id keeps persistence idempotent across MCP reconnects.
+    try {
+      return await getJson<JsonObject>(
+        `${baseUrl}/api/discovery-sessions/${encodeURIComponent(sessionId)}`,
+        headers,
+      );
+    } catch {
+      throw error;
+    }
+  }
 }
 
 // Reassemble the inner agent's textual output from the SSE event log.

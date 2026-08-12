@@ -406,6 +406,39 @@ describe('buildOpenCodeMcpConfigContent', () => {
     ).toBeNull();
   });
 
+  it('emits explicit disabled entries for MCP servers inherited from global config', () => {
+    const raw = buildOpenCodeMcpConfigContent([], {}, {
+      disabledServerIds: ['open-design'],
+    });
+
+    expect(raw).not.toBeNull();
+    const parsed = JSON.parse(raw as string) as {
+      mcp: Record<string, Record<string, unknown>>;
+    };
+    expect(parsed.mcp['open-design']).toEqual({ enabled: false });
+  });
+
+  it('disabled entries override an enabled server with the same id', () => {
+    const raw = buildOpenCodeMcpConfigContent(
+      [
+        {
+          id: 'open-design',
+          transport: 'stdio',
+          enabled: true,
+          command: 'od',
+          args: ['mcp'],
+        },
+      ],
+      {},
+      { disabledServerIds: ['open-design'] },
+    );
+
+    const parsed = JSON.parse(raw as string) as {
+      mcp: Record<string, Record<string, unknown>>;
+    };
+    expect(parsed.mcp['open-design']).toEqual({ enabled: false });
+  });
+
   it('emits an external_directory allowlist when the daemon grants OpenCode absolute project dirs', () => {
     const raw = buildOpenCodeMcpConfigContent(
       [],
