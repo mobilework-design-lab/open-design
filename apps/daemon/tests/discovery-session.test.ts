@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { findFirstQuestionForm } from '@open-design/contracts';
 import { mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -287,5 +288,67 @@ describe('discovery session persistence', () => {
       action: 'submit',
       answers: { modules: ['dashboard', 'users'] },
     })).toThrowError(DiscoverySessionError);
+  });
+
+  it('round-trips an agent-generated full form into a persisted authoritative brief', async () => {
+    const parsed = findFirstQuestionForm(`
+Discovery is ready.
+<question-form id="website-discovery" title="Website discovery">
+{
+  "questions": [
+    {
+      "id": "delivery",
+      "label": "Delivery format",
+      "type": "radio",
+      "required": true,
+      "default": "Multi-file site",
+      "options": [
+        { "label": "Single HTML file", "value": "single" },
+        { "label": "Multi-file site", "value": "multi" }
+      ]
+    },
+    {
+      "id": "platform",
+      "label": "Target platform",
+      "type": "checkbox",
+      "default": ["Responsive web"],
+      "options": [
+        { "label": "Desktop web", "value": "desktop" },
+        { "label": "Responsive web", "value": "responsive" }
+      ]
+    }
+  ]
+}
+</question-form>
+`);
+    expect(parsed).not.toBeNull();
+
+    dataDir = await mkdtemp(path.join(tmpdir(), 'od-discovery-'));
+    const db = openDatabase(dataDir, { dataDir });
+    insertProject(db, { id: 'project-1', name: 'Test project', createdAt: 1, updatedAt: 1 });
+    insertConversation(db, { id: 'conversation-1', projectId: 'project-1', createdAt: 1, updatedAt: 1 });
+    createDiscoverySession(db, {
+      id: 'discovery-round-trip',
+      projectId: 'project-1',
+      conversationId: 'conversation-1',
+      initialRequest: 'Create a city activity discovery website.',
+      form: parsed!.form,
+    });
+    submitDiscoveryAnswers(db, 'discovery-round-trip', {
+      action: 'accept_defaults',
+      additionalContext: 'Include separate event detail and favorites pages.',
+    });
+
+    closeDatabase();
+    const reopened = openDatabase(dataDir, { dataDir });
+    const persisted = getDiscoverySession(reopened, 'discovery-round-trip');
+    expect(persisted?.status).toBe('ready');
+    expect(persisted?.answers).toEqual({ delivery: 'multi', platform: ['responsive'] });
+
+    const brief = buildDiscoveryBrief(persisted!);
+    expect(brief).toContain('Create a city activity discovery website.');
+    expect(brief).toContain('Multi-file site (multi)');
+    expect(brief).toContain('Responsive web (responsive)');
+    expect(brief).toContain('Include separate event detail and favorites pages.');
   });
 });
