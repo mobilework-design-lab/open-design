@@ -1,5 +1,6 @@
 import {
   buildProjectRawFileUrl,
+  type McpRunCreateRequest,
   type OpenDesignA2AArtifactData,
   type OpenDesignA2ARequestMetadata,
   type QuestionFormEnvelope,
@@ -8,6 +9,14 @@ import { randomUUID } from 'node:crypto';
 
 type JsonRecord = Record<string, unknown>;
 
+type OpenDesignA2ARunCreateBody = McpRunCreateRequest & {
+  conversationId: string;
+  assistantMessageId: string;
+  clientRequestId: string;
+  message: string;
+  currentPrompt: string;
+};
+
 export interface OpenDesignContextRef {
   projectId: string;
   conversationId: string;
@@ -15,6 +24,7 @@ export interface OpenDesignContextRef {
 
 export interface OpenDesignRunRef extends OpenDesignContextRef {
   runId: string;
+  assistantMessageId: string;
 }
 
 export interface OpenDesignRunStatus extends OpenDesignRunRef {
@@ -93,16 +103,21 @@ export class HttpOpenDesignA2ADaemonClient implements OpenDesignA2ADaemonClient 
     metadata: OpenDesignA2ARequestMetadata,
   ): Promise<OpenDesignRunRef> {
     await this.appendUserMessage(context, prompt);
-    const body: JsonRecord = {
+    const assistantMessageId = randomUUID();
+    const clientRequestId = `a2a-${randomUUID()}`;
+    const body: OpenDesignA2ARunCreateBody = {
       projectId: context.projectId,
       conversationId: context.conversationId,
+      assistantMessageId,
+      clientRequestId,
       message: prompt,
+      currentPrompt: prompt,
+      ...(metadata.agentId ? { agentId: metadata.agentId } : {}),
+      ...(metadata.model ? { model: metadata.model } : {}),
+      ...(metadata.skillId ? { skillId: metadata.skillId } : {}),
+      ...(metadata.pluginId ? { pluginId: metadata.pluginId } : {}),
+      ...(metadata.pluginInputs ? { pluginInputs: metadata.pluginInputs } : {}),
     };
-    if (metadata.agentId) body.agentId = metadata.agentId;
-    if (metadata.model) body.model = metadata.model;
-    if (metadata.skillId) body.skillId = metadata.skillId;
-    if (metadata.pluginId) body.pluginId = metadata.pluginId;
-    if (metadata.pluginInputs) body.pluginInputs = metadata.pluginInputs;
 
     const created = await this.request('/api/runs', {
       method: 'POST',
@@ -110,7 +125,14 @@ export class HttpOpenDesignA2ADaemonClient implements OpenDesignA2ADaemonClient 
     });
     const runId = stringValue(created.runId);
     if (!runId) throw new Error('Open Design run creation returned no run id');
-    return { ...context, runId };
+    const returnedAssistantMessageId = stringValue(created.assistantMessageId);
+    if (!returnedAssistantMessageId) {
+      throw new Error('Open Design run creation returned no assistant message id');
+    }
+    if (returnedAssistantMessageId !== assistantMessageId) {
+      throw new Error('Open Design run creation returned a mismatched assistant message id');
+    }
+    return { ...context, runId, assistantMessageId };
   }
 
   async getRun(run: OpenDesignRunRef): Promise<OpenDesignRunStatus> {

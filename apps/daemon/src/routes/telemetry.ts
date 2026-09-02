@@ -124,6 +124,20 @@ export function registerTelemetryRoutes(app: Express, deps: RegisterTelemetryRou
   };
 }
 
+export function logDaemonFatalError(
+  eventName: string,
+  properties: Record<string, unknown>,
+  logger: Pick<Console, 'error'> = console,
+): void {
+  const message = typeof properties.error_message === 'string'
+    ? properties.error_message
+    : 'Unknown fatal daemon error';
+  const stack = typeof properties.error_stack === 'string'
+    ? `\n${properties.error_stack}`
+    : '';
+  logger.error(`[daemon] ${eventName}: ${message}${stack}`);
+}
+
 function installFatalTelemetryHandlers({
   analyticsService,
   getAppVersion,
@@ -139,6 +153,7 @@ function installFatalTelemetryHandlers({
   ): void => {
     if (fatalShuttingDown) return;
     fatalShuttingDown = true;
+    logDaemonFatalError(eventName, properties);
     const flushSequence = (async () => {
       try {
         await analyticsService.captureSafety({

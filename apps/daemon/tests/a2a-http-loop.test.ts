@@ -7,6 +7,7 @@ import { registerA2ARoutes } from '../src/routes/a2a.js';
 let server: http.Server;
 let baseUrl: string;
 const userMessages: string[] = [];
+const runRequests: Array<Record<string, unknown>> = [];
 let runCount = 0;
 
 beforeAll(async () => {
@@ -19,9 +20,14 @@ beforeAll(async () => {
     userMessages.push(String(req.body?.content ?? ''));
     res.json({ message: req.body });
   });
-  app.post('/api/runs', (_req, res) => {
+  app.post('/api/runs', (req, res) => {
     runCount += 1;
-    res.json({ runId: `run-${runCount}` });
+    const runRequest = isRecord(req.body) ? req.body : {};
+    runRequests.push(runRequest);
+    res.json({
+      runId: `run-${runCount}`,
+      assistantMessageId: runRequest.assistantMessageId,
+    });
   });
   app.get('/api/runs/:runId', (req, res) => {
     res.json({
@@ -175,6 +181,18 @@ describe('Open Design A2A HTTP multi-turn loop', () => {
       'Create a bold landing page.',
       '[form answers — discovery]\n- Visual tone: Bold [value: bold]',
     ]);
+    expect(runRequests).toHaveLength(2);
+    expect(runRequests.map((request) => request.message)).toEqual(userMessages);
+    expect(runRequests.map((request) => request.currentPrompt)).toEqual(userMessages);
+
+    const assistantMessageIds = runRequests.map((request) => request.assistantMessageId);
+    expect(assistantMessageIds).toEqual([expect.any(String), expect.any(String)]);
+    expect(assistantMessageIds.every((id) => typeof id === 'string' && id.length > 0)).toBe(true);
+    expect(new Set(assistantMessageIds).size).toBe(2);
+
+    const clientRequestIds = runRequests.map((request) => request.clientRequestId);
+    expect(clientRequestIds).toEqual([expect.stringMatching(/^a2a-/), expect.stringMatching(/^a2a-/)]);
+    expect(new Set(clientRequestIds).size).toBe(2);
   });
 });
 

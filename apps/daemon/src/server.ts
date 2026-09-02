@@ -7584,31 +7584,6 @@ export async function startServer({
         ));
         return finishWithRetryDecision('failed', code, signal);
       }
-      if (status === 'succeeded' && run.a2aClient && !run.questionForm) {
-        const resolvedQuestionForm = resolveA2AQuestionForm({
-          assistantText: clarifyingQuestionText,
-          standaloneToolResult: standaloneQuestionFormToolText,
-          prompt: typeof message === 'string' ? message : '',
-        });
-        if (resolvedQuestionForm) {
-          run.questionForm = {
-            schemaVersion: 1,
-            form: resolvedQuestionForm.form,
-          };
-          run.questionFormDiagnostic = {
-            source: resolvedQuestionForm.source,
-            repaired: resolvedQuestionForm.repaired,
-            ...(resolvedQuestionForm.reason ? { reason: resolvedQuestionForm.reason } : {}),
-          };
-          send('agent', {
-            type: 'diagnostic',
-            name: 'a2a_question_form_resolved',
-            source: resolvedQuestionForm.source,
-            repaired: resolvedQuestionForm.repaired,
-            ...(resolvedQuestionForm.reason ? { reason: resolvedQuestionForm.reason } : {}),
-          });
-        }
-      }
       if (
         code === 0 &&
         !run.cancelRequested &&
@@ -7742,6 +7717,31 @@ export async function startServer({
           runArtifactSideEffects.artifactWriteSeen ||
           runArtifactSideEffects.liveArtifactSeen,
       });
+      if (status === 'succeeded' && run.a2aClient && !run.questionForm) {
+        const resolvedQuestionForm = resolveA2AQuestionForm({
+          assistantText: clarifyingQuestionText,
+          standaloneToolResult: standaloneQuestionFormToolText,
+          prompt: typeof message === 'string' ? message : '',
+        });
+        if (resolvedQuestionForm) {
+          run.questionForm = {
+            schemaVersion: 1,
+            form: resolvedQuestionForm.form,
+          };
+          run.questionFormDiagnostic = {
+            source: resolvedQuestionForm.source,
+            repaired: resolvedQuestionForm.repaired,
+            ...(resolvedQuestionForm.reason ? { reason: resolvedQuestionForm.reason } : {}),
+          };
+          send('agent', {
+            type: 'diagnostic',
+            name: 'a2a_question_form_resolved',
+            source: resolvedQuestionForm.source,
+            repaired: resolvedQuestionForm.repaired,
+            ...(resolvedQuestionForm.reason ? { reason: resolvedQuestionForm.reason } : {}),
+          });
+        }
+      }
       // Skip the close-handler failure emit when the run is already
       // terminal: the inactivity watchdog (failForInactivity) finishes the
       // run — sending its error and clearing run.clients/eventsLogStream —

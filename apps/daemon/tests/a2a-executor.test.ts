@@ -44,7 +44,11 @@ class FakeDaemonClient implements OpenDesignA2ADaemonClient {
     this.prompts.push(prompt);
     this.contexts.push(context);
     this.run += 1;
-    return { ...context, runId: `run-${this.run}` };
+    return {
+      ...context,
+      runId: `run-${this.run}`,
+      assistantMessageId: `assistant-${this.run}`,
+    };
   }
 
   async getRun(run: OpenDesignRunRef): Promise<OpenDesignRunStatus> {

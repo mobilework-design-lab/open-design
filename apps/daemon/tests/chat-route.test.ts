@@ -233,6 +233,53 @@ process.exit(0);
     );
   });
 
+  it('finalizes an A2A question form after classifying the child close and keeps serving', async () => {
+    await withFakeAgent(
+      'opencode',
+      `
+console.log(JSON.stringify({ type: 'step_start', sessionID: 'a2a-question-session' }));
+console.log(JSON.stringify({
+  type: 'text',
+  sessionID: 'a2a-question-session',
+  part: { text: '先确认设计方向。\\n<question-form id="discovery" title="Design direction">\\n{"questions":[{"id":"style","label":"Style?","type":"radio","options":[{"label":"Modern","value":"modern"}]}]}\\n</question-form>' },
+}));
+console.log(JSON.stringify({ type: 'step_finish', part: { tokens: { input: 1, output: 1 } } }));
+process.exit(0);
+`,
+      async () => {
+        const createResponse = await fetch(`${baseUrl}/api/runs`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-od-client': 'a2a',
+          },
+          body: JSON.stringify({
+            agentId: 'opencode',
+            message: 'Create a simple landing page',
+          }),
+        });
+        expect(createResponse.status).toBe(202);
+        const { runId } = await createResponse.json() as { runId: string };
+
+        const terminal = await waitForRunStatus(baseUrl, runId);
+        expect(terminal.status).toBe('succeeded');
+
+        const statusResponse = await fetch(`${baseUrl}/api/runs/${runId}`);
+        const statusBody = await statusResponse.json() as {
+          questionForm?: { form?: { id?: string } };
+        };
+        expect(statusBody.questionForm?.form?.id).toBe('discovery');
+
+        const eventsResponse = await fetch(`${baseUrl}/api/runs/${runId}/events`);
+        const eventsBody = await readSseUntil(eventsResponse, 'event: final');
+        expect(eventsBody).toContain('a2a_question_form_resolved');
+
+        const healthResponse = await fetch(`${baseUrl}/api/health`);
+        expect(healthResponse.status).toBe(200);
+      },
+    );
+  });
+
   it('marks json stream runs failed when an error frame exits with code 0', async () => {
     const conversationId = `conv-${randomUUID()}`;
 

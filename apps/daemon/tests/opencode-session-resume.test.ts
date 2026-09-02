@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { HttpOpenDesignA2ADaemonClient } from '../src/a2a/daemon-client.js';
 import { startServer } from '../src/server.js';
 
 // End-to-end coverage for OpenCode native (capture-style) session resume.
@@ -36,10 +37,18 @@ type RunStatus = {
   errorCode: string | null;
   eventsLogPath: string;
   resumable?: boolean;
+  nativeSessionRecovery?: { state?: string };
+  promptCache?: { hit?: boolean; missReason?: string | null };
 };
 
 type RunInvocation = { argv: string[]; stdin: string; cwd: string };
 type RunEvent = { event: string; data: unknown };
+type ConversationMessage = {
+  id: string;
+  role: string;
+  content: string;
+  runStatus?: string | null;
+};
 
 const SESSION = 'ses_e2e0000resume0000';
 const FIRST_REPLY_SENTINEL = 'FIRST_TURN_REPLY_SENTINEL_0c7d2';
@@ -98,6 +107,75 @@ describe('opencode native session resume', () => {
     // carried by the resumed session), but must carry the new user message.
     expect(resume.stdin).not.toContain(FIRST_REPLY_SENTINEL);
     expect(resume.stdin).toContain('second user request please');
+  });
+
+  it('keeps the assistant cursor and latest prompt when A2A starts both turns', async () => {
+    binDir = await mkdtemp(path.join(os.tmpdir(), 'od-a2a-opencode-resume-bin-'));
+    const { bin, logPath } = await writeCapturingOpencode(binDir, 'a2a-opencode-capture');
+
+    clearTelemetryEnv();
+    started = (await startServer({
+      port: 0,
+      returnServer: true,
+      siteOutputMode: null,
+    })) as StartedServer;
+    await putConfig(started.url, {
+      agentId: 'opencode',
+      agentCliEnv: { opencode: { OPENCODE_BIN: bin } },
+      telemetry: { metrics: true, content: false, artifactManifest: false },
+      privacyDecisionAt: Date.now(),
+    });
+
+    const encoded = await createConversation(started.url);
+    const [projectId, conversationId] = encoded.split('::') as [string, string];
+    const context = { projectId, conversationId };
+    const client = new HttpOpenDesignA2ADaemonClient({ baseUrl: () => started?.url ?? null });
+
+    const firstRun = await client.startRun(context, 'first A2A user request', {
+      agentId: 'opencode',
+    });
+    const firstStatus = await waitForRun(started.url, firstRun.runId);
+    expect(firstStatus.status, JSON.stringify(firstStatus)).toBe('succeeded');
+
+    const firstMessages = await readConversationMessages(started.url, context);
+    expect(firstMessages).toEqual([
+      expect.objectContaining({ role: 'user', content: 'first A2A user request' }),
+      expect.objectContaining({
+        id: firstRun.assistantMessageId,
+        role: 'assistant',
+        content: FIRST_REPLY_SENTINEL,
+        runStatus: 'succeeded',
+      }),
+    ]);
+
+    const secondRun = await client.startRun(context, 'second A2A user request please', {
+      agentId: 'opencode',
+    });
+    const secondStatus = await waitForRun(started.url, secondRun.runId);
+    expect(secondStatus.status, JSON.stringify(secondStatus)).toBe('succeeded');
+    expect(secondStatus.nativeSessionRecovery).toMatchObject({ state: 'resumed' });
+    expect(secondStatus.promptCache).toMatchObject({ hit: true });
+
+    const messages = await readConversationMessages(started.url, context);
+    expect(messages.map((message) => message.role)).toEqual([
+      'user',
+      'assistant',
+      'user',
+      'assistant',
+    ]);
+    expect(messages.at(-1)).toMatchObject({
+      id: secondRun.assistantMessageId,
+      role: 'assistant',
+      content: 'Resumed reply.',
+      runStatus: 'succeeded',
+    });
+
+    const runs = await readChatTurnRuns(logPath, encoded);
+    expect(runs).toHaveLength(2);
+    const resume = runs[1] as RunInvocation;
+    expect(resume.argv).toContain('-s');
+    expect(resume.stdin).toContain('second A2A user request please');
+    expect(resume.stdin).not.toContain(FIRST_REPLY_SENTINEL);
   });
 
   it('transparently auto-reseeds within the same turn on `Session not found`', async () => {
@@ -182,10 +260,10 @@ async function writeCapturingOpencode(
   dir: string,
   name: string,
 ): Promise<{ bin: string; logPath: string }> {
-  const bin = path.join(dir, name);
   const logPath = path.join(dir, `${name}-log.jsonl`);
-  await writeFile(
-    bin,
+  const bin = await writeFakeOpencodeExecutable(
+    dir,
+    name,
     fakeOpencodeSource({
       logPath,
       body: `
@@ -196,9 +274,7 @@ async function writeCapturingOpencode(
   console.log(JSON.stringify({ type: 'step_finish', sessionID: SESSION, part: { type: 'step-finish', tokens: { input: 11, output: 7, reasoning: 0, cache: { read: 5, write: 2 } }, cost: 0 } }));
   setTimeout(() => process.exit(0), 10);`,
     }),
-    'utf8',
   );
-  await chmod(bin, 0o755);
   return { bin, logPath };
 }
 
@@ -209,10 +285,10 @@ async function writeMissingSessionOpencode(
   dir: string,
   name: string,
 ): Promise<{ bin: string; logPath: string }> {
-  const bin = path.join(dir, name);
   const logPath = path.join(dir, `${name}-log.jsonl`);
-  await writeFile(
-    bin,
+  const bin = await writeFakeOpencodeExecutable(
+    dir,
+    name,
     fakeOpencodeSource({
       logPath,
       body: `
@@ -226,9 +302,7 @@ async function writeMissingSessionOpencode(
   console.log(JSON.stringify({ type: 'step_finish', sessionID: SESSION, part: { type: 'step-finish', tokens: { input: 8, output: 2, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0 } }));
   setTimeout(() => process.exit(0), 10);`,
     }),
-    'utf8',
   );
-  await chmod(bin, 0o755);
   return { bin, logPath };
 }
 
@@ -238,10 +312,10 @@ async function writeNoHandleOpencode(
   dir: string,
   name: string,
 ): Promise<{ bin: string; logPath: string }> {
-  const bin = path.join(dir, name);
   const logPath = path.join(dir, `${name}-log.jsonl`);
-  await writeFile(
-    bin,
+  const bin = await writeFakeOpencodeExecutable(
+    dir,
+    name,
     fakeOpencodeSource({
       logPath,
       body: `
@@ -250,10 +324,32 @@ async function writeNoHandleOpencode(
   console.log(JSON.stringify({ type: 'step_finish', part: { type: 'step-finish', tokens: { input: 8, output: 2, reasoning: 0, cache: { read: 0, write: 0 } }, cost: 0 } }));
   setTimeout(() => process.exit(0), 10);`,
     }),
-    'utf8',
   );
-  await chmod(bin, 0o755);
   return { bin, logPath };
+}
+
+async function writeFakeOpencodeExecutable(
+  dir: string,
+  name: string,
+  source: string,
+): Promise<string> {
+  if (process.platform === 'win32') {
+    const scriptName = `${name}.cjs`;
+    const script = path.join(dir, scriptName);
+    const bin = path.join(dir, `${name}.cmd`);
+    await writeFile(script, source, 'utf8');
+    await writeFile(
+      bin,
+      `@echo off\r\n"${process.execPath}" "%~dp0${scriptName}" %*\r\n`,
+      'utf8',
+    );
+    return bin;
+  }
+
+  const bin = path.join(dir, name);
+  await writeFile(bin, source, 'utf8');
+  await chmod(bin, 0o755);
+  return bin;
 }
 
 function fakeOpencodeSource(opts: { logPath: string; body: string }): string {
@@ -380,6 +476,19 @@ async function waitForRun(url: string, runId: string): Promise<RunStatus> {
     await delay(100);
   }
   throw new Error(`run ${runId} did not finish`);
+}
+
+async function readConversationMessages(
+  url: string,
+  context: { projectId: string; conversationId: string },
+): Promise<ConversationMessage[]> {
+  const response = await fetch(
+    `${url}/api/projects/${encodeURIComponent(context.projectId)}`
+      + `/conversations/${encodeURIComponent(context.conversationId)}/messages`,
+  );
+  expect(response.status).toBe(200);
+  const body = (await response.json()) as { messages?: ConversationMessage[] };
+  return body.messages ?? [];
 }
 
 // Chat-turn `run` invocations for this conversation, in call order. OpenCode is
