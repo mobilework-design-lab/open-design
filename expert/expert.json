@@ -1,0 +1,122 @@
+{
+  "slug": "web-design-html-expert",
+  "type": "expert",
+  "name": "网页设计与 HTML 交付专家",
+  "summary": "通过多轮需求确认生成并校验可离线交付的单 HTML 或多文件静态网站。",
+  "description": "先确认产品定位与视觉方向，再用原生文件工具生成 HTML、CSS 和 JavaScript，并通过确定性 finalizer 校验资源、体积、入口和事务提交。",
+  "language": "zh",
+  "tags": [
+    "网页设计",
+    "HTML",
+    "静态网站"
+  ],
+  "quick_prompts": [
+    "为我的产品设计一个响应式落地页",
+    "根据这份需求生成一个多文件静态网站",
+    "直接生成一个可离线打开的单 HTML 页面"
+  ],
+  "default_prompt": "为我的产品设计一个响应式落地页",
+  "profession": "网页设计与前端交付专家",
+  "category_id": "01-ProductDesign",
+  "avatar_url": "avatars/expert.svg",
+  "skills": [
+    {
+      "name": "web-design-html",
+      "origin": "managed",
+      "edit_policy": "managed"
+    }
+  ],
+  "agent": {
+    "id": "web-design-html-expert",
+    "name": "网页设计与 HTML 交付专家",
+    "display_name": "网页设计与 HTML 交付专家",
+    "profession": "网页设计与前端交付专家",
+    "description": "引导需求发现、确认视觉方向、生成静态网站并完成确定性交付。",
+    "mode": "primary",
+    "steps": 100,
+    "avatar_url": "avatars/expert.svg",
+    "skills": [
+      "web-design-html"
+    ],
+    "permission": {
+      "read": "allow",
+      "edit": "allow",
+      "bash": {
+        "*": "ask",
+        "node *finalize.mjs*": "allow"
+      },
+      "webfetch": "deny",
+      "task": {
+        "*": "deny"
+      }
+    },
+    "permission_reason": "需要运行包内置的 finalize.mjs，对本地草稿执行确定性校验和事务提交。"
+  },
+  "package_resources": [
+    {
+      "path": ".opencode/skills/web-design-html/assets/tokens.css",
+      "kind": "text",
+      "sha256": "449b81b8e31ed24c46eedd89adaf30f879f4b7535aea961051efca1a14f48911"
+    },
+    {
+      "path": ".opencode/skills/web-design-html/references/craft/accessibility.md",
+      "kind": "text",
+      "sha256": "627c5b800d09d279a654a82659668953216896ea8b236da48e0ec5092e987970"
+    },
+    {
+      "path": ".opencode/skills/web-design-html/references/craft/anti-ai-slop.md",
+      "kind": "text",
+      "sha256": "1d316fe6925ad86ec70352197eef4378361d073223297ff9e3eccc2e5c752ffb"
+    },
+    {
+      "path": ".opencode/skills/web-design-html/references/craft/color.md",
+      "kind": "text",
+      "sha256": "ebe798582c9e0575a769e113af2765309496c074876005e8e99a3632847019dc"
+    },
+    {
+      "path": ".opencode/skills/web-design-html/references/craft/interaction-states.md",
+      "kind": "text",
+      "sha256": "f602c1f6f2a3c39085092e27835b856b3315047b8f705db766670f5c79c1fb73"
+    },
+    {
+      "path": ".opencode/skills/web-design-html/references/craft/layout-and-hierarchy.md",
+      "kind": "text",
+      "sha256": "38a3e04f92c16fc17461f8b6bd39e1c66f34f1dc30e804e34df32b1dc3b49c55"
+    },
+    {
+      "path": ".opencode/skills/web-design-html/references/craft/responsive.md",
+      "kind": "text",
+      "sha256": "63f2c2781b815694feb4af8b064051979d0ed12e467c7cb6ee45b49bf423752e"
+    },
+    {
+      "path": ".opencode/skills/web-design-html/references/craft/typography.md",
+      "kind": "text",
+      "sha256": "0b13d88c62c9eadf5e48ba8a74125153e6c871a0ddd9841c549200508f8e3315"
+    },
+    {
+      "path": ".opencode/skills/web-design-html/references/design-system.md",
+      "kind": "text",
+      "sha256": "632ee7f3357ac189fdef9a88f8b09a65255b3daa45295ad95f678e9899433c6c"
+    },
+    {
+      "path": ".opencode/skills/web-design-html/references/discovery.md",
+      "kind": "text",
+      "sha256": "0667fd9b79bee0acccc17c027ff66e3e586e2d20e76b9488366152317a8dc034"
+    },
+    {
+      "path": ".opencode/skills/web-design-html/references/output-contract.md",
+      "kind": "text",
+      "sha256": "d043bd2fac1e0f01d13934ff941fe2321664fc9ef6f4e23d0d2d5657fd4dea42"
+    },
+    {
+      "path": ".opencode/skills/web-design-html/scripts/finalize.mjs",
+      "kind": "text",
+      "sha256": "9370940359875173d17c189e04d1c258750b97b529609920cc46e55d20470c33"
+    },
+    {
+      "path": ".opencode/skills/web-design-html/SKILL.md",
+      "kind": "text",
+      "sha256": "c247a79e12d3e8b1f668c4ca56993a3bb4b282d786492db7626a87f715a53651"
+    }
+  ]
+}

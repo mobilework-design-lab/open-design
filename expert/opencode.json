@@ -1,0 +1,26 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "agent": {
+    "web-design-html-expert": {
+      "mode": "primary",
+      "description": "引导需求发现、确认视觉方向、生成静态网站并完成确定性交付。",
+      "steps": 100,
+      "permission": {
+        "*": "ask",
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "list": "allow",
+        "lsp": "allow",
+        "edit": "allow",
+        "bash": { "*": "ask", "node *finalize.mjs*": "allow" },
+        "webfetch": "deny",
+        "external_directory": { "*": "ask" },
+        "doom_loop": "ask",
+        "skill": { "*": "deny", "web-design-html": "allow" },
+        "task": { "*": "deny" },
+        "todowrite": "allow"
+      }
+    }
+  }
+}
